@@ -11,7 +11,9 @@ from OpenGL.GLU import *
 
 BASE_DIR = Path(__file__).resolve().parent
 
-MAZE_FILE = BASE_DIR / "maze.txt"
+FLOORS_DIR = BASE_DIR / "floors"
+
+MAX_FLOORS = 2
 
 WALL_TEXTURE_FILE = BASE_DIR / "textures" / "w.png"
 FLOOR_TEXTURE_FILE = BASE_DIR / "textures" / "f.png"
@@ -25,6 +27,7 @@ WALK_SOUND_FILE = BASE_DIR / "sounds" / "walk.wav"
 # ============================================================
 
 CELL_SIZE = 2.0
+FLOOR_LEVEL_HEIGHT = CELL_SIZE
 
 # Куб пола:
 #
@@ -36,7 +39,7 @@ CELL_SIZE = 2.0
 #   ─────────────
 #       Y=-2
 #
-FLOOR_BOTTOM = -CELL_SIZE
+FLOOR_BOTTOM = -CELL_SIZE*0.1
 FLOOR_TOP = 0.0
 
 # Куб стены:
@@ -49,7 +52,7 @@ FLOOR_TOP = 0.0
 #
 WALL_BOTTOM = 0.0
 WALL_TOP = CELL_SIZE
-
+FLOOR_HEIGHT = CELL_SIZE * 0.1
 
 # ============================================================
 # ИГРОК
@@ -236,71 +239,88 @@ def create_shader_program(
 # ЗАГРУЗКА ЛАБИРИНТА
 # ============================================================
 
-def load_maze(path):
+def load_floors():
+    floors = []
 
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Не найден файл лабиринта:\n{path}"
+    total_starts = 0
+    total_finishes = 0
+
+    for level in range(100):
+
+        filename = FLOORS_DIR / f"{level:02d}.txt"
+
+        if not filename.exists():
+            break
+
+        with open(filename, "r", encoding="utf-8") as file:
+            lines = file.read().splitlines()
+
+        if not lines:
+            raise ValueError(
+                f"Файл {filename.name} пустой."
+            )
+
+        # Сохраняем пробелы в начале строк.
+        width = max(len(line) for line in lines)
+
+        grid = [
+            line.ljust(width)
+            for line in lines
+        ]
+
+        height = len(grid)
+
+        start = None
+        finishes = []
+
+        for z, row in enumerate(grid):
+
+            for x, ch in enumerate(row):
+
+                if ch == "s":
+
+                    if start is not None:
+                        raise ValueError(
+                            f"В файле {filename.name} "
+                            "больше одной клетки 's'."
+                        )
+
+                    start = (x, z)
+
+                elif ch == "e":
+
+                    finishes.append((x, z))
+
+        total_starts += 1 if start is not None else 0
+        total_finishes += len(finishes)
+
+        floors.append({
+            "grid": grid,
+            "width": width,
+            "height": height,
+            "start": start,
+            "finishes": finishes,
+        })
+
+    if not floors:
+        raise ValueError(
+            "В каталоге floors нет файлов 00.txt, "
+            "01.txt и т.д."
         )
 
-    # Нельзя использовать strip(),
-    # потому что пробелы являются частью карты.
-    lines = path.read_text(
-        encoding="utf-8"
-    ).splitlines()
-
-    if not lines:
+    if total_starts != 1:
         raise ValueError(
-            "Файл лабиринта пуст."
-        )
-
-    width = max(
-        len(line)
-        for line in lines
-    )
-
-    grid = [
-        list(line.ljust(width))
-        for line in lines
-    ]
-
-    starts = []
-    finishes = []
-
-    for z, row in enumerate(grid):
-
-        for x, ch in enumerate(row):
-
-            if ch == "s":
-                starts.append(
-                    (x, z)
-                )
-
-            elif ch == "e":
-                finishes.append(
-                    (x, z)
-                )
-
-    if len(starts) != 1:
-        raise ValueError(
-            "В лабиринте должна быть "
+            "Во всех этажах вместе должна быть "
             "ровно одна клетка 's'."
         )
 
-    if not finishes:
+    if total_finishes != 1:
         raise ValueError(
-            "В лабиринте должна быть "
-            "хотя бы одна клетка 'e'."
+            "Во всех этажах вместе должна быть "
+            "ровно одна клетка 'e'."
         )
 
-    return (
-        grid,
-        width,
-        len(grid),
-        starts[0],
-        finishes,
-    )
-
+    return floors
 
 # ============================================================
 # ТЕКСТУРЫ
@@ -509,23 +529,31 @@ class MazeGame:
 
     def __init__(
         self,
-        grid,
-        width,
-        height,
-        start,
-        finishes,
+        floors,
         wall_texture,
         floor_texture,
         finish_texture,
         walk_sound
-    ):
+        ):
 
-        self.grid = grid
+        self.floors = floors
+        self.floor_count = len(floors)
 
-        self.width = width
-        self.height = height
+        self.wall_texture = wall_texture
+        self.floor_texture = floor_texture
+        self.finish_texture = finish_texture
 
-        self.finishes = finishes
+        self.walk_sound = walk_sound
+        self.walk_channel = None
+
+        self.current_floor = 0
+
+        self.grid = floors[0]["grid"]
+        self.width = floors[0]["width"]
+        self.height = floors[0]["height"]
+        self.finishes = floors[0]["finishes"]
+
+        self.finished = False
 
         self.wall_texture = (
             wall_texture
@@ -545,18 +573,6 @@ class MazeGame:
 
         self.walk_channel = None
 
-        sx, sz = start
-
-        self.x = (
-            sx * CELL_SIZE
-            + CELL_SIZE / 2
-        )
-
-        self.z = (
-            sz * CELL_SIZE
-            + CELL_SIZE / 2
-        )
-
         # Начальное направление:
         # вперёд по -Z.
         self.yaw = 0.0
@@ -570,7 +586,54 @@ class MazeGame:
         self.last_mouse_x = 0
         self.last_mouse_y = 0
 
-        self.finished = False
+        start_floor = None
+        start_position = None
+
+        finish_position = None
+        finish_floor = None
+
+        for floor_index, floor in enumerate(floors):
+
+            if floor["start"] is not None:
+
+                start_floor = floor_index
+                start_position = floor["start"]
+
+            if floor["finishes"]:
+
+                finish_floor = floor_index
+                finish_position = floor["finishes"][0]
+
+        if start_floor is None:
+            raise ValueError(
+                "Не найден старт 's'."
+            )
+
+        if finish_floor is None:
+            raise ValueError(
+                "Не найден финиш 's'."
+            )
+
+        self.current_floor = start_floor
+
+        self.grid = floors[start_floor]["grid"]
+        self.width = floors[start_floor]["width"]
+        self.height = floors[start_floor]["height"]
+        self.finishes = [
+            finish_position
+        ]
+        self.finish_floor = finish_floor
+        start_x, start_z = start_position
+
+        self.x = (
+            start_x * CELL_SIZE
+            + CELL_SIZE / 2
+        )
+
+        self.z = (
+            start_z * CELL_SIZE
+            + CELL_SIZE / 2
+        )
 
         self.finish_shader = create_shader_program(
             VERTEX_SHADER_SOURCE,
@@ -591,26 +654,81 @@ class MazeGame:
     # ========================================================
     # КООРДИНАТЫ
     # ========================================================
-
-    def cell_at_world(
-        self,
-        x,
-        z
-    ):
-
+    
+    def floor_y(self):
         return (
-            int(
-                math.floor(
-                    x / CELL_SIZE
-                )
-            ),
-            int(
-                math.floor(
-                    z / CELL_SIZE
-                )
-            )
+            self.current_floor
+            * FLOOR_LEVEL_HEIGHT
         )
 
+    def change_floor(self, direction):
+
+        current_x = math.floor(
+            self.x / CELL_SIZE
+        )
+
+        current_z = math.floor(
+            self.z / CELL_SIZE
+        )
+
+        # Переход возможен только из пустой клетки
+        if self.cell_at_world(self.x, self.z) != " ":
+            return
+
+        target_floor = (
+            self.current_floor + direction
+        )
+
+        if (
+            target_floor < 0
+            or target_floor >= self.floor_count
+        ):
+            return
+
+        target_grid = self.floors[
+            target_floor
+        ]["grid"]
+
+        if current_z < 0 or current_z >= len(target_grid):
+            return
+
+        row = target_grid[current_z]
+
+        if current_x < 0 or current_x >= len(row):
+            return
+
+        # На соседнем этаже клетка тоже должна быть пустой
+        if row[current_x] != " ":
+            return
+
+        self.current_floor = target_floor
+
+        self.grid = self.floors[
+            self.current_floor
+        ]["grid"]
+
+        self.width = self.floors[
+            self.current_floor
+        ]["width"]
+
+        self.height = self.floors[
+            self.current_floor
+        ]["height"]
+
+    def cell_at_world(self, x, z):
+
+        cx = math.floor(x / CELL_SIZE)
+        cz = math.floor(z / CELL_SIZE)
+
+        if (
+            cz < 0
+            or cz >= len(self.grid)
+            or cx < 0
+            or cx >= len(self.grid[cz])
+        ):
+            return "w"
+
+        return self.grid[cz][cx]
 
     def is_wall(
         self,
@@ -667,7 +785,6 @@ class MazeGame:
         r = PLAYER_RADIUS
 
         points = (
-
             (x - r, z - r),
             (x + r, z - r),
             (x - r, z + r),
@@ -678,26 +795,51 @@ class MazeGame:
 
             (x - r, z),
             (x + r, z),
-
         )
 
         for px, pz in points:
 
-            cx, cz = (
-                self.cell_at_world(
-                    px,
-                    pz
-                )
+            cell = self.cell_at_world(
+                px,
+                pz
             )
 
-            if self.is_wall(
-                cx,
-                cz
-            ):
+            if cell == "w" or cell == "e":
                 return False
 
         return True
 
+    def touches_finish(
+        self,
+        x,
+        z
+    ):
+
+        r = PLAYER_RADIUS
+
+        points = (
+            (x - r, z - r),
+            (x + r, z - r),
+            (x - r, z + r),
+            (x + r, z + r),
+
+            (x, z - r),
+            (x, z + r),
+
+            (x - r, z),
+            (x + r, z),
+        )
+
+        for px, pz in points:
+
+            if self.cell_at_world(
+                px,
+                pz
+            ) == "e":
+
+                return True
+
+        return False
 
     # ========================================================
     # ДВИЖЕНИЕ
@@ -725,21 +867,59 @@ class MazeGame:
         old_x = self.x
         old_z = self.z
 
-        # X
-        if self.can_stand(
-            self.x + dx,
+        # ========================================================
+        # ДВИЖЕНИЕ ПО X
+        # ========================================================
+
+        next_x = self.x + dx
+
+        # Если игрок касается финиша —
+        # завершаем игру, но внутрь куба не заходим.
+        if self.touches_finish(
+            next_x,
             self.z
         ):
 
-            self.x += dx
+            self.finished = True
 
-        # Z
+            if self.walk_channel is not None:
+                self.walk_channel.stop()
+                self.walk_channel = None
+
+            return False
+
         if self.can_stand(
-            self.x,
-            self.z + dz
+            next_x,
+            self.z
         ):
 
-            self.z += dz
+            self.x = next_x
+
+        # ========================================================
+        # ДВИЖЕНИЕ ПО Z
+        # ========================================================
+
+        next_z = self.z + dz
+
+        if self.touches_finish(
+            self.x,
+            next_z
+        ):
+
+            self.finished = True
+
+            if self.walk_channel is not None:
+                self.walk_channel.stop()
+                self.walk_channel = None
+
+            return False
+
+        if self.can_stand(
+            self.x,
+            next_z
+        ):
+
+            self.z = next_z
 
         moved = (
             abs(self.x - old_x)
@@ -747,25 +927,15 @@ class MazeGame:
             abs(self.z - old_z)
         ) > 0.000001
 
-        if moved:
-            self.check_finish()
-
         return moved
 
 
     def check_finish(self):
 
-        cx, cz = (
-            self.cell_at_world(
-                self.x,
-                self.z
-            )
-        )
-
-        if self.is_finish(
-            cx,
-            cz
-        ):
+        if self.cell_at_world(
+            self.x,
+            self.z
+        ) == "e":
 
             self.finished = True
 
@@ -1002,22 +1172,17 @@ class MazeGame:
     # ПОЛ
     # ========================================================
 
-    def draw_floor_cube(
-        self,
-        x,
-        z
-    ):
+    def draw_floor_cube(self, x, z):
+
+        y = self.floor_y()
 
         self.draw_cube(
-
             x,
-            FLOOR_BOTTOM,
+            y + FLOOR_BOTTOM,
             z,
-
             x + CELL_SIZE,
-            FLOOR_TOP,
+            y + FLOOR_HEIGHT,
             z + CELL_SIZE,
-
             self.floor_texture
         )
 
@@ -1026,22 +1191,17 @@ class MazeGame:
     # СТЕНА
     # ========================================================
 
-    def draw_wall_cube(
-        self,
-        x,
-        z
-    ):
+    def draw_wall_cube(self, x, z):
+
+        y = self.floor_y()
 
         self.draw_cube(
-
             x,
-            WALL_BOTTOM,
+            y + WALL_BOTTOM,
             z,
-
             x + CELL_SIZE,
-            WALL_TOP,
+            y + WALL_TOP,
             z + CELL_SIZE,
-
             self.wall_texture
         )
 
@@ -1052,18 +1212,16 @@ class MazeGame:
     
     def draw_finish_cube(self, x, z):
 
+        y = self.floor_y()
+
         self.draw_cube(
-
             x,
-            WALL_BOTTOM,
+            y + WALL_BOTTOM,
             z,
-
             x + CELL_SIZE,
-            WALL_TOP,
+            y + WALL_TOP,
             z + CELL_SIZE,
-
             self.finish_texture,
-
             self.finish_shader
         )
 
@@ -1139,37 +1297,43 @@ class MazeGame:
 
     def draw_world(self):
 
-        for z, row in enumerate(self.grid):
+        saved_floor = self.current_floor
 
-            for x, ch in enumerate(row):
+        for floor_index, floor in enumerate(self.floors):
 
-                world_x = x * CELL_SIZE
-                world_z = z * CELL_SIZE
+            self.current_floor = floor_index
 
-                # Пол находится на один уровень ниже стен.
-                # Для стены и e отдельный куб пола всё равно существует.
+            grid = floor["grid"]
 
-                self.draw_floor_cube(
-                    world_x,
-                    world_z
-                )
+            for z, row in enumerate(grid):
 
-                # Стена
-                if ch == "w":
+                for x, ch in enumerate(row):
 
-                    self.draw_wall_cube(
-                        world_x,
-                        world_z
-                    )
+                    world_x = x * CELL_SIZE
+                    world_z = z * CELL_SIZE
 
-                # Финиш — такой же высокий куб,
-                # как стена.
-                elif ch == "e":
+                    if ch == "f" or ch == "s":
 
-                    self.draw_finish_cube(
-                        world_x,
-                        world_z
-                    )
+                        self.draw_floor_cube(
+                            world_x,
+                            world_z
+                        )
+
+                    elif ch == "w":
+
+                        self.draw_wall_cube(
+                            world_x,
+                            world_z
+                        )
+
+                    elif ch == "e":
+
+                        self.draw_finish_cube(
+                            world_x,
+                            world_z
+                        )
+
+        self.current_floor = saved_floor
 
         self.draw_sky_ceiling()
 
@@ -1308,19 +1472,24 @@ def render(
         )
     )
 
+    camera_y = (
+        game.floor_y()
+        + PLAYER_HEIGHT
+    )
 
     # ========================================================
     # Камера
     # ========================================================
-
+    
+    pitch_angle = math.radians(game.head_pitch)
     gluLookAt(
 
         game.x,
-        PLAYER_HEIGHT,
+        camera_y,
         game.z,
 
         look_x,
-        look_y,
+        camera_y + math.sin(pitch_angle),
         look_z,
 
         0,
@@ -1336,16 +1505,46 @@ def render(
 # СБРОС ИГРЫ
 # ============================================================
 
-def reset_game(
-    game,
-    start
-):
+def reset_game(game):
 
-    sx, sz = start
+    start_floor = None
+    start_position = None
 
-    game.head_yaw = 0.0
-    game.head_pitch = 0.0
-    game.mouse_looking = False
+    for floor_index, floor in enumerate(game.floors):
+
+        if floor["start"] is not None:
+
+            start_floor = floor_index
+            start_position = floor["start"]
+
+            break
+
+    if start_floor is None:
+        return
+
+    # --------------------------------------------------------
+    # Возвращаем этаж старта
+    # --------------------------------------------------------
+
+    game.current_floor = start_floor
+
+    game.grid = game.floors[
+        start_floor
+    ]["grid"]
+
+    game.width = game.floors[
+        start_floor
+    ]["width"]
+
+    game.height = game.floors[
+        start_floor
+    ]["height"]
+
+    # --------------------------------------------------------
+    # Возвращаем позицию игрока
+    # --------------------------------------------------------
+
+    sx, sz = start_position
 
     game.x = (
         sx * CELL_SIZE
@@ -1357,9 +1556,29 @@ def reset_game(
         + CELL_SIZE / 2
     )
 
+    # --------------------------------------------------------
+    # Камера
+    # --------------------------------------------------------
+
     game.yaw = 0.0
+    game.head_yaw = 0.0
+    game.head_pitch = 0.0
+    game.mouse_looking = False
+
+    # --------------------------------------------------------
+    # Состояние игры
+    # --------------------------------------------------------
 
     game.finished = False
+
+    # --------------------------------------------------------
+    # Останавливаем звук шагов
+    # --------------------------------------------------------
+
+    if game.walk_channel is not None:
+
+        game.walk_channel.stop()
+        game.walk_channel = None
 
 
 # ============================================================
@@ -1409,15 +1628,8 @@ def main():
     # Лабиринт
     # --------------------------------------------------------
 
-    (
-        grid,
-        maze_width,
-        maze_height,
-        start,
-        finishes
-    ) = load_maze(
-        MAZE_FILE
-    )
+    floors = load_floors()
+
 
 
     # --------------------------------------------------------
@@ -1464,11 +1676,7 @@ def main():
 
     game = MazeGame(
 
-        grid,
-        maze_width,
-        maze_height,
-        start,
-        finishes,
+        floors,
 
         wall_texture,
         floor_texture,
@@ -1526,9 +1734,16 @@ def main():
                 ):
 
                     reset_game(
-                        game,
-                        start
+                        game
                     )
+
+                elif event.key == pygame.K_q:
+
+                    game.change_floor(+1)
+
+                elif event.key == pygame.K_z:
+
+                    game.change_floor(-1)
 
 
             elif (
@@ -1572,7 +1787,6 @@ def main():
                 if event.button == 1:
 
                     game.mouse_looking = True
-
                     game.last_mouse_x = event.pos[0]
                     game.last_mouse_y = event.pos[1]
 
@@ -1582,6 +1796,9 @@ def main():
                 if event.button == 1:
 
                     game.mouse_looking = False
+                    # Возвращаем взгляд в исходное положение
+                    game.head_yaw = 0.0
+                    game.head_pitch = 0.0
 
 
             elif event.type == pygame.MOUSEMOTION:
