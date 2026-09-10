@@ -58,7 +58,7 @@ FLOOR_HEIGHT = CELL_SIZE * 0.1
 # ИГРОК
 # ============================================================
 
-PLAYER_HEIGHT = 0.65
+PLAYER_HEIGHT = 0.90
 PLAYER_RADIUS = 0.22
 
 MOVE_SPEED = 3.5
@@ -671,37 +671,74 @@ class MazeGame:
             self.z / CELL_SIZE
         )
 
-        # Переход возможен только из пустой клетки
-        if self.cell_at_world(self.x, self.z) != " ":
-            return
+        # ========================================================
+        # ВВЕРХ
+        # ========================================================
 
-        target_floor = (
-            self.current_floor + direction
-        )
+        if direction > 0:
 
-        if (
-            target_floor < 0
-            or target_floor >= self.floor_count
-        ):
-            return
+            target_floor = (
+                self.current_floor + 1
+            )
 
-        target_grid = self.floors[
-            target_floor
-        ]["grid"]
+            # Выше этажей нет
+            if target_floor >= self.floor_count:
+                return
 
-        if current_z < 0 or current_z >= len(target_grid):
-            return
+            target_grid = self.floors[
+                target_floor
+            ]["grid"]
 
-        row = target_grid[current_z]
+            # Проверяем координату Z
+            if (
+                current_z < 0
+                or current_z >= len(target_grid)
+            ):
+                return
 
-        if current_x < 0 or current_x >= len(row):
-            return
+            row = target_grid[current_z]
 
-        # На соседнем этаже клетка тоже должна быть пустой
-        if row[current_x] != " ":
-            return
+            # Проверяем координату X
+            if (
+                current_x < 0
+                or current_x >= len(row)
+            ):
+                return
 
-        self.current_floor = target_floor
+            # Сверху обязательно должна быть пустая клетка
+            if row[current_x] != " ":
+                return
+
+            # Переходим вверх
+            self.current_floor = target_floor
+
+        # ========================================================
+        # ВНИЗ
+        # ========================================================
+
+        else:
+
+            # Вниз можно только если текущая клетка пустая
+            if self.cell_at_world(
+                self.x,
+                self.z
+            ) != " ":
+                return
+
+            target_floor = (
+                self.current_floor - 1
+            )
+
+            # Ниже этажей нет
+            if target_floor < 0:
+                return
+
+            # Переходим вниз
+            self.current_floor = target_floor
+
+        # ========================================================
+        # Обновляем текущую карту
+        # ========================================================
 
         self.grid = self.floors[
             self.current_floor
