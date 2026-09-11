@@ -582,18 +582,18 @@ class OBJModel:
         self.current_material = None
 
         self.load_mtl()
+        self.load_material_textures()
         self.load_obj()
 
-        self.load_material_textures()
-
     def load_mtl(self):
-
         if not self.mtl_file.exists():
             print(
                 f"Предупреждение: не найден MTL: "
                 f"{self.mtl_file}"
             )
             return
+
+        self.current_material = None
 
         with open(
             self.mtl_file,
@@ -602,10 +602,12 @@ class OBJModel:
         ) as file:
 
             for line in file:
-
                 line = line.strip()
 
-                if not line or line.startswith("#"):
+                if not line:
+                    continue
+
+                if line.startswith("#"):
                     continue
 
                 parts = line.split()
@@ -615,27 +617,33 @@ class OBJModel:
 
                 command = parts[0]
 
+                # ------------------------------------------------
+                # Материал
+                # ------------------------------------------------
                 if command == "newmtl":
 
-                    if len(parts) >= 2:
+                    if len(parts) < 2:
+                        continue
 
-                        name = parts[1]
+                    name = parts[1]
 
-                        self.materials[name] = {
-                            "Kd": (1.0, 1.0, 1.0),
-                            "map_Kd": None,
-                            "texture": None
-                        }
+                    self.materials[name] = {
+                        "Kd": (1.0, 1.0, 1.0),
+                        "map_Kd": None,
+                        "texture": None
+                    }
 
-                        self.current_material = name
+                    self.current_material = name
 
+                # ------------------------------------------------
+                # Цвет материала
+                # ------------------------------------------------
                 elif command == "Kd":
 
                     if (
                         self.current_material is not None
                         and len(parts) >= 4
                     ):
-
                         self.materials[
                             self.current_material
                         ]["Kd"] = (
@@ -644,13 +652,15 @@ class OBJModel:
                             float(parts[3])
                         )
 
+                # ------------------------------------------------
+                # Текстура
+                # ------------------------------------------------
                 elif command == "map_Kd":
 
                     if (
                         self.current_material is not None
                         and len(parts) >= 2
                     ):
-
                         texture_name = " ".join(
                             parts[1:]
                         )
@@ -660,37 +670,34 @@ class OBJModel:
                         ]["map_Kd"] = texture_name
 
     def load_material_textures(self):
+        for name, material in self.materials.items():
 
-        for material_name, material in self.materials.items():
-
-            texture_name = material["map_Kd"]
+            texture_name = material.get("map_Kd")
 
             if not texture_name:
                 continue
 
-            # Обычно текстура лежит рядом с MTL.
-            texture_path = (
-                self.mtl_file.parent
-                / texture_name
-            )
+            texture_path = Path(texture_name)
 
-            if not texture_path.exists():
-
-                print(
-                    f"Предупреждение: текстура материала "
-                    f"'{material_name}' не найдена: "
-                    f"{texture_path}"
+            if not texture_path.is_absolute():
+                texture_path = (
+                    self.mtl_file.parent
+                    / texture_path
                 )
 
+            if not texture_path.exists():
+                print(
+                    f"Предупреждение: текстура "
+                    f"материала '{name}' не найдена: "
+                    f"{texture_path}"
+                )
                 continue
 
             try:
-
                 surface = pygame.image.load(
                     str(texture_path)
                 ).convert_alpha()
 
-                # OBJ UV обычно имеют начало координат снизу.
                 surface = pygame.transform.flip(
                     surface,
                     False,
@@ -749,24 +756,17 @@ class OBJModel:
                 material["texture"] = texture
 
                 print(
-                    f"Загружена текстура объекта "
-                    f"'{material_name}': "
-                    f"{texture_path.name}"
+                    f"Загружена текстура "
+                    f"'{name}': {texture_path.name}"
                 )
 
-            except pygame.error as error:
-
+            except Exception as error:
                 print(
                     f"Ошибка загрузки текстуры "
                     f"{texture_path}: {error}"
                 )
 
-            except Exception as error:
-
-                print(
-                    f"Ошибка создания OpenGL-текстуры "
-                    f"{texture_path}: {error}"
-                )
+                material["texture"] = None
 
         glBindTexture(
             GL_TEXTURE_2D,
@@ -902,7 +902,6 @@ class OBJModel:
         scale=1.0,
         rotation=0.0
     ):
-
         glPushMatrix()
 
         glTranslatef(
@@ -924,11 +923,9 @@ class OBJModel:
             scale
         )
 
-        glEnable(GL_TEXTURE_2D)
-
-        # ВАЖНО:
-        # текстура привязывается ДО glBegin().
-        current_texture = None
+        glEnable(
+            GL_TEXTURE_2D
+        )
 
         for face, material_name in self.faces:
 
@@ -948,7 +945,9 @@ class OBJModel:
                     b
                 )
 
-                texture = material["texture"]
+                texture = material.get(
+                    "texture"
+                )
 
             else:
 
@@ -958,19 +957,23 @@ class OBJModel:
                     1.0
                 )
 
-            # Меняем текстуру только вне glBegin/glEnd.
-            if texture != current_texture:
-
+            # Текстура привязывается ДО glBegin().
+            if texture is not None:
                 glBindTexture(
                     GL_TEXTURE_2D,
-                    texture if texture is not None else 0
+                    texture
+                )
+            else:
+                glBindTexture(
+                    GL_TEXTURE_2D,
+                    0
                 )
 
-                current_texture = texture
+            glBegin(
+                GL_TRIANGLES
+            )
 
-            glBegin(GL_TRIANGLES)
-
-            # Триангуляция polygon face.
+            # Триангуляция полигона
             for i in range(
                 1,
                 len(face) - 1
@@ -993,6 +996,7 @@ class OBJModel:
                         len(self.vertices)
                     )
 
+                    # Нормаль
                     if normal_index is not None:
 
                         normal_index = self._index(
@@ -1012,6 +1016,7 @@ class OBJModel:
                             nz
                         )
 
+                    # UV
                     if (
                         texture is not None
                         and texcoord_index is not None
@@ -1254,7 +1259,6 @@ class MazeGame:
         x,
         z
     ):
-
         model = self.objects.get(symbol)
 
         if model is None:
@@ -1262,16 +1266,6 @@ class MazeGame:
 
         if not model.vertices:
             return
-
-        min_x = min(
-            v[0]
-            for v in model.vertices
-        )
-
-        max_x = max(
-            v[0]
-            for v in model.vertices
-        )
 
         min_y = min(
             v[1]
@@ -1283,40 +1277,23 @@ class MazeGame:
             for v in model.vertices
         )
 
-        min_z = min(
-            v[2]
-            for v in model.vertices
-        )
+        object_height = max_y - min_y
 
-        max_z = max(
-            v[2]
-            for v in model.vertices
-        )
-
-        size_y = max_y - min_y
-
-        if size_y <= 0.000001:
+        if object_height <= 0.000001:
             return
 
-        # Высота объекта = 50% высоты стены.
-        target_height = (
-            CELL_SIZE * 0.5
-        )
+        # Высота объекта = половина высоты стены.
+        # Стена имеет высоту 2.0.
+        target_height = CELL_SIZE * 0.5
 
-        scale = (
-            target_height / size_y
-        )
+        scale = target_height / object_height
 
         # Центр клетки.
-        center_x = (
-            x + CELL_SIZE / 2
-        )
+        center_x = x + CELL_SIZE / 2
+        center_z = z + CELL_SIZE / 2
 
-        center_z = (
-            z + CELL_SIZE / 2
-        )
-
-        # Нижняя точка модели ставится точно на пол.
+        # Ставим нижнюю точку объекта на верхнюю
+        # поверхность пола.
         object_y = (
             self.floor_y()
             - min_y * scale
@@ -1661,6 +1638,10 @@ class MazeGame:
     # ========================================================
 
     def update(self, dt, keys):
+        self.object_rotation += 90.0 * dt
+
+        if self.object_rotation >= 360.0:
+            self.object_rotation -= 360.0
 
         if self.finished:
 
@@ -1739,10 +1720,7 @@ class MazeGame:
                 self.walk_channel.stop()
                 self.walk_channel = None
         
-        #self.object_rotation += 90.0 * dt
-
-        if self.object_rotation >= 360.0:
-            self.object_rotation -= 360.0
+        
 
 
     # ========================================================
