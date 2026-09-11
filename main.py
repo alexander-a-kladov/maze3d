@@ -54,7 +54,7 @@ FLOOR_TOP = 0.0
 WALL_BOTTOM = 0.0
 WALL_TOP = CELL_SIZE
 FLOOR_HEIGHT = CELL_SIZE * 0.1
-
+RENDER_DISTANCE = 20.0 * CELL_SIZE
 # ============================================================
 # ИГРОК
 # ============================================================
@@ -1443,6 +1443,27 @@ class MazeGame:
             == "w"
         )
 
+    def is_visible_from_player(self, world_x, world_z):
+        dx = world_x - self.x
+        dz = world_z - self.z
+
+        distance = math.sqrt(dx * dx + dz * dz)
+
+        if distance > RENDER_DISTANCE:
+            return False
+
+        # Если совсем рядом — всегда рисуем
+        if distance < CELL_SIZE * 2:
+            return True
+
+        # Направление от игрока к объекту
+        target_angle = math.degrees(math.atan2(dx, -dz))
+
+        # Разница относительно направления взгляда
+        angle_diff = (target_angle - self.yaw + 180) % 360 - 180
+
+        # 100 градусов в каждую сторону
+        return abs(angle_diff) <= 100
 
     def is_finish(
         self,
@@ -1997,6 +2018,8 @@ class MazeGame:
     def draw_world(self):
 
         saved_floor = self.current_floor
+        countm = 0
+        counto = 0
 
         for floor_index, floor in enumerate(self.floors):
 
@@ -2020,6 +2043,12 @@ class MazeGame:
                         z * CELL_SIZE
                     )
 
+                    if not self.is_visible_from_player(
+                        world_x + CELL_SIZE / 2,
+                        world_z + CELL_SIZE / 2
+                    ):
+                        continue
+                    countm += 1
                     if ch == "f" or ch == "s":
 
                         self.draw_floor_cube(
@@ -2057,6 +2086,12 @@ class MazeGame:
                         obj["z"] * CELL_SIZE
                     )
 
+                    if not self.is_visible_from_player(
+                        world_x + CELL_SIZE / 2,
+                        world_z + CELL_SIZE / 2
+                    ):
+                        continue
+                    counto += 1
                     self.draw_object(
                         "k",
                         world_x,
@@ -2064,6 +2099,7 @@ class MazeGame:
                     )
 
         self.current_floor = saved_floor
+        #print(countm, counto)
 
         self.draw_sky_ceiling()
 
@@ -2311,6 +2347,56 @@ def reset_game(game):
         game.walk_channel = None
 
 
+def draw_fps(clock, font):
+    """Рендерит FPS в текстуру и отображает поверх OpenGL сцены"""
+    # 1. Считаем FPS и создаем Surface с текстом
+    fps_text = f"FPS: {int(clock.get_fps())}"
+    text_surface = font.render(fps_text, True, (255, 255, 0, 255)) # Желтый текст
+    text_data = pygame.image.tostring(text_surface, "RGBA", True)
+    width, height = text_surface.get_size()
+
+    # 2. Переключаемся в 2D-режим (Ортографическая проекция)
+    glMatrixMode(GL_PROJECTION)
+    glPushMatrix()
+    glLoadIdentity()
+    # Настраиваем плоскость под размеры окна (замените 800 и 600 на ваши переменные)
+    glOrtho(0, 800, 0, 600, -1, 1)
+    
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+    glLoadIdentity()
+
+    # 3. Настройка параметров OpenGL для текста
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glEnable(GL_TEXTURE_2D)
+
+    # Создаем и привязываем текстуру
+    texture_id = glGenTextures(1)
+    glBindTexture(GL_TEXTURE_2D, texture_id)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, text_data)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+
+    # 4. Рисуем квадрат с текстурой в левом верхнем углу (y = 560 при высоте окна 600)
+    x, y = 10, 560 
+    glBegin(GL_QUADS)
+    glTexCoord2f(0.0, 0.0); glVertex2f(x, y)
+    glTexCoord2f(1.0, 0.0); glVertex2f(x + width, y)
+    glTexCoord2f(1.0, 1.0); glVertex2f(x + width, y + height)
+    glTexCoord2f(0.0, 1.0); glVertex2f(x, y + height)
+    glEnd()
+
+    # 5. Очищаем ресурсы и возвращаем настройки 3D
+    glDeleteTextures([texture_id])
+    glDisable(GL_TEXTURE_2D)
+    glDisable(GL_BLEND)
+    
+    glPopMatrix()
+    glMatrixMode(GL_PROJECTION)
+    glPopMatrix()
+    glMatrixMode(GL_MODELVIEW)
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -2334,7 +2420,7 @@ def main():
     height = 720
 
 
-    pygame.display.set_mode(
+    screen = pygame.display.set_mode(
 
         (
             width,
@@ -2417,6 +2503,7 @@ def main():
 
 
     clock = pygame.time.Clock()
+    font = pygame.font.SysFont("Arial", 24)
 
     running = True
 
@@ -2610,7 +2697,8 @@ def main():
             width,
             height
         )
-
+        
+        draw_fps(clock, font)
 
         pygame.display.flip()
 
