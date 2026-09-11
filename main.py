@@ -12,6 +12,7 @@ from OpenGL.GLU import *
 BASE_DIR = Path(__file__).resolve().parent
 
 FLOORS_DIR = BASE_DIR / "floors"
+OBJECTS_DIR = BASE_DIR / "objects"
 
 MAX_FLOORS = 2
 
@@ -240,6 +241,7 @@ def create_shader_program(
 # ============================================================
 
 def load_floors():
+
     floors = []
 
     total_starts = 0
@@ -252,7 +254,11 @@ def load_floors():
         if not filename.exists():
             break
 
-        with open(filename, "r", encoding="utf-8") as file:
+        with open(
+            filename,
+            "r",
+            encoding="utf-8"
+        ) as file:
             lines = file.read().splitlines()
 
         if not lines:
@@ -260,8 +266,10 @@ def load_floors():
                 f"Файл {filename.name} пустой."
             )
 
-        # Сохраняем пробелы в начале строк.
-        width = max(len(line) for line in lines)
+        width = max(
+            len(line)
+            for line in lines
+        )
 
         grid = [
             line.ljust(width)
@@ -272,6 +280,15 @@ def load_floors():
 
         start = None
         finishes = []
+
+        # Отдельный список объектов этажа
+        objects = []
+
+        # Копия карты, в которой k превращается в f
+        clean_grid = [
+            list(row)
+            for row in grid
+        ]
 
         for z, row in enumerate(grid):
 
@@ -289,9 +306,32 @@ def load_floors():
 
                 elif ch == "e":
 
-                    finishes.append((x, z))
+                    finishes.append(
+                        (x, z)
+                    )
 
-        total_starts += 1 if start is not None else 0
+                elif ch == "k":
+
+                    # k НЕ является клеткой лабиринта.
+                    # Под ним появляется обычный пол.
+                    clean_grid[z][x] = "f"
+
+                    objects.append({
+                        "type": "k",
+                        "x": x,
+                        "z": z
+                    })
+
+        # Возвращаем строки обратно
+        grid = [
+            "".join(row)
+            for row in clean_grid
+        ]
+
+        total_starts += (
+            1 if start is not None else 0
+        )
+
         total_finishes += len(finishes)
 
         floors.append({
@@ -300,12 +340,15 @@ def load_floors():
             "height": height,
             "start": start,
             "finishes": finishes,
+
+            # Объекты отдельно от лабиринта
+            "objects": objects
         })
 
     if not floors:
         raise ValueError(
-            "В каталоге floors нет файлов 00.txt, "
-            "01.txt и т.д."
+            "В каталоге floors нет файлов "
+            "00.txt, 01.txt и т.д."
         )
 
     if total_starts != 1:
@@ -520,6 +563,509 @@ def load_walk_sound(path):
 
         return None
 
+# =======
+# Загрузка 3d-моделей
+# =======
+
+class OBJModel:
+
+    def __init__(self, obj_file, mtl_file):
+        self.obj_file = Path(obj_file)
+        self.mtl_file = Path(mtl_file)
+
+        self.vertices = []
+        self.texcoords = []
+        self.normals = []
+        self.faces = []
+
+        self.materials = {}
+        self.current_material = None
+
+        self.load_mtl()
+        self.load_obj()
+
+        self.load_material_textures()
+
+    def load_mtl(self):
+
+        if not self.mtl_file.exists():
+            print(
+                f"Предупреждение: не найден MTL: "
+                f"{self.mtl_file}"
+            )
+            return
+
+        with open(
+            self.mtl_file,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            for line in file:
+
+                line = line.strip()
+
+                if not line or line.startswith("#"):
+                    continue
+
+                parts = line.split()
+
+                if not parts:
+                    continue
+
+                command = parts[0]
+
+                if command == "newmtl":
+
+                    if len(parts) >= 2:
+
+                        name = parts[1]
+
+                        self.materials[name] = {
+                            "Kd": (1.0, 1.0, 1.0),
+                            "map_Kd": None,
+                            "texture": None
+                        }
+
+                        self.current_material = name
+
+                elif command == "Kd":
+
+                    if (
+                        self.current_material is not None
+                        and len(parts) >= 4
+                    ):
+
+                        self.materials[
+                            self.current_material
+                        ]["Kd"] = (
+                            float(parts[1]),
+                            float(parts[2]),
+                            float(parts[3])
+                        )
+
+                elif command == "map_Kd":
+
+                    if (
+                        self.current_material is not None
+                        and len(parts) >= 2
+                    ):
+
+                        texture_name = " ".join(
+                            parts[1:]
+                        )
+
+                        self.materials[
+                            self.current_material
+                        ]["map_Kd"] = texture_name
+
+    def load_material_textures(self):
+
+        for material_name, material in self.materials.items():
+
+            texture_name = material["map_Kd"]
+
+            if not texture_name:
+                continue
+
+            # Обычно текстура лежит рядом с MTL.
+            texture_path = (
+                self.mtl_file.parent
+                / texture_name
+            )
+
+            if not texture_path.exists():
+
+                print(
+                    f"Предупреждение: текстура материала "
+                    f"'{material_name}' не найдена: "
+                    f"{texture_path}"
+                )
+
+                continue
+
+            try:
+
+                surface = pygame.image.load(
+                    str(texture_path)
+                ).convert_alpha()
+
+                # OBJ UV обычно имеют начало координат снизу.
+                surface = pygame.transform.flip(
+                    surface,
+                    False,
+                    True
+                )
+
+                width, height = surface.get_size()
+
+                data = pygame.image.tostring(
+                    surface,
+                    "RGBA",
+                    True
+                )
+
+                texture = glGenTextures(1)
+
+                glBindTexture(
+                    GL_TEXTURE_2D,
+                    texture
+                )
+
+                glTexParameteri(
+                    GL_TEXTURE_2D,
+                    GL_TEXTURE_MIN_FILTER,
+                    GL_LINEAR_MIPMAP_LINEAR
+                )
+
+                glTexParameteri(
+                    GL_TEXTURE_2D,
+                    GL_TEXTURE_MAG_FILTER,
+                    GL_LINEAR
+                )
+
+                glTexParameteri(
+                    GL_TEXTURE_2D,
+                    GL_TEXTURE_WRAP_S,
+                    GL_REPEAT
+                )
+
+                glTexParameteri(
+                    GL_TEXTURE_2D,
+                    GL_TEXTURE_WRAP_T,
+                    GL_REPEAT
+                )
+
+                gluBuild2DMipmaps(
+                    GL_TEXTURE_2D,
+                    GL_RGBA,
+                    width,
+                    height,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    data
+                )
+
+                material["texture"] = texture
+
+                print(
+                    f"Загружена текстура объекта "
+                    f"'{material_name}': "
+                    f"{texture_path.name}"
+                )
+
+            except pygame.error as error:
+
+                print(
+                    f"Ошибка загрузки текстуры "
+                    f"{texture_path}: {error}"
+                )
+
+            except Exception as error:
+
+                print(
+                    f"Ошибка создания OpenGL-текстуры "
+                    f"{texture_path}: {error}"
+                )
+
+        glBindTexture(
+            GL_TEXTURE_2D,
+            0
+        )
+
+    def load_obj(self):
+
+        if not self.obj_file.exists():
+
+            raise FileNotFoundError(
+                f"Не найден OBJ: {self.obj_file}"
+            )
+
+        with open(
+            self.obj_file,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            for line in file:
+
+                line = line.strip()
+
+                if not line or line.startswith("#"):
+                    continue
+
+                parts = line.split()
+
+                if not parts:
+                    continue
+
+                command = parts[0]
+
+                if command == "v":
+
+                    self.vertices.append(
+                        (
+                            float(parts[1]),
+                            float(parts[2]),
+                            float(parts[3])
+                        )
+                    )
+
+                elif command == "vt":
+
+                    self.texcoords.append(
+                        (
+                            float(parts[1]),
+                            float(parts[2])
+                        )
+                    )
+
+                elif command == "vn":
+
+                    self.normals.append(
+                        (
+                            float(parts[1]),
+                            float(parts[2]),
+                            float(parts[3])
+                        )
+                    )
+
+                elif command == "usemtl":
+
+                    if len(parts) >= 2:
+
+                        self.current_material = parts[1]
+
+                elif command == "f":
+
+                    face = []
+
+                    for item in parts[1:]:
+
+                        values = item.split("/")
+
+                        vertex_index = int(
+                            values[0]
+                        )
+
+                        texcoord_index = None
+                        normal_index = None
+
+                        if len(values) >= 2:
+
+                            if values[1]:
+
+                                texcoord_index = int(
+                                    values[1]
+                                )
+
+                        if len(values) >= 3:
+
+                            if values[2]:
+
+                                normal_index = int(
+                                    values[2]
+                                )
+
+                        face.append(
+                            (
+                                vertex_index,
+                                texcoord_index,
+                                normal_index
+                            )
+                        )
+
+                    if len(face) >= 3:
+
+                        self.faces.append(
+                            (
+                                face,
+                                self.current_material
+                            )
+                        )
+
+    def _index(self, index, length):
+
+        if index is None:
+            return None
+
+        if index > 0:
+            return index - 1
+
+        return length + index
+
+    def draw(
+        self,
+        x,
+        y,
+        z,
+        scale=1.0,
+        rotation=0.0
+    ):
+
+        glPushMatrix()
+
+        glTranslatef(
+            x,
+            y,
+            z
+        )
+
+        glRotatef(
+            rotation,
+            0.0,
+            1.0,
+            0.0
+        )
+
+        glScalef(
+            scale,
+            scale,
+            scale
+        )
+
+        glEnable(GL_TEXTURE_2D)
+
+        # ВАЖНО:
+        # текстура привязывается ДО glBegin().
+        current_texture = None
+
+        for face, material_name in self.faces:
+
+            material = self.materials.get(
+                material_name
+            )
+
+            texture = None
+
+            if material is not None:
+
+                r, g, b = material["Kd"]
+
+                glColor3f(
+                    r,
+                    g,
+                    b
+                )
+
+                texture = material["texture"]
+
+            else:
+
+                glColor3f(
+                    1.0,
+                    1.0,
+                    1.0
+                )
+
+            # Меняем текстуру только вне glBegin/glEnd.
+            if texture != current_texture:
+
+                glBindTexture(
+                    GL_TEXTURE_2D,
+                    texture if texture is not None else 0
+                )
+
+                current_texture = texture
+
+            glBegin(GL_TRIANGLES)
+
+            # Триангуляция polygon face.
+            for i in range(
+                1,
+                len(face) - 1
+            ):
+
+                triangle = (
+                    face[0],
+                    face[i],
+                    face[i + 1]
+                )
+
+                for (
+                    vertex_index,
+                    texcoord_index,
+                    normal_index
+                ) in triangle:
+
+                    vertex_index = self._index(
+                        vertex_index,
+                        len(self.vertices)
+                    )
+
+                    if normal_index is not None:
+
+                        normal_index = self._index(
+                            normal_index,
+                            len(self.normals)
+                        )
+
+                        nx, ny, nz = (
+                            self.normals[
+                                normal_index
+                            ]
+                        )
+
+                        glNormal3f(
+                            nx,
+                            ny,
+                            nz
+                        )
+
+                    if (
+                        texture is not None
+                        and texcoord_index is not None
+                    ):
+
+                        texcoord_index = self._index(
+                            texcoord_index,
+                            len(self.texcoords)
+                        )
+
+                        u, v = (
+                            self.texcoords[
+                                texcoord_index
+                            ]
+                        )
+
+                        glTexCoord2f(
+                            u,
+                            v
+                        )
+
+                    else:
+
+                        glTexCoord2f(
+                            0.0,
+                            0.0
+                        )
+
+                    vx, vy, vz = (
+                        self.vertices[
+                            vertex_index
+                        ]
+                    )
+
+                    glVertex3f(
+                        vx,
+                        vy,
+                        vz
+                    )
+
+            glEnd()
+
+        glBindTexture(
+            GL_TEXTURE_2D,
+            0
+        )
+
+        glColor3f(
+            1.0,
+            1.0,
+            1.0
+        )
+
+        glPopMatrix()
 
 # ============================================================
 # ИГРА
@@ -543,6 +1089,10 @@ class MazeGame:
         self.floor_texture = floor_texture
         self.finish_texture = finish_texture
 
+        self.objects = {}
+
+        self.load_objects()
+
         self.walk_sound = walk_sound
         self.walk_channel = None
 
@@ -554,6 +1104,8 @@ class MazeGame:
         self.finishes = floors[0]["finishes"]
 
         self.finished = False
+
+        self.object_rotation = 0.0
 
         self.wall_texture = (
             wall_texture
@@ -650,6 +1202,133 @@ class MazeGame:
             "u_texture"
         )
 
+    # =====
+    # Загрузка 3d-объектов
+    # =====
+
+    def load_objects(self):
+
+        object_files = {
+            "k": (
+                OBJECTS_DIR / "k.obj",
+                OBJECTS_DIR / "k.mtl"
+            )
+        }
+
+        for symbol, (
+            obj_file,
+            mtl_file
+        ) in object_files.items():
+
+            if not obj_file.exists():
+
+                print(
+                    f"Предупреждение: "
+                    f"не найден объект {obj_file}"
+                )
+
+                continue
+
+            try:
+
+                self.objects[symbol] = OBJModel(
+                    obj_file,
+                    mtl_file
+                )
+
+                print(
+                    f"Загружен объект '{symbol}': "
+                    f"{obj_file.name}"
+                )
+
+            except Exception as error:
+
+                print(
+                    f"Ошибка загрузки объекта "
+                    f"'{symbol}': {error}"
+                )
+
+    def draw_object(
+        self,
+        symbol,
+        x,
+        z
+    ):
+
+        model = self.objects.get(symbol)
+
+        if model is None:
+            return
+
+        if not model.vertices:
+            return
+
+        min_x = min(
+            v[0]
+            for v in model.vertices
+        )
+
+        max_x = max(
+            v[0]
+            for v in model.vertices
+        )
+
+        min_y = min(
+            v[1]
+            for v in model.vertices
+        )
+
+        max_y = max(
+            v[1]
+            for v in model.vertices
+        )
+
+        min_z = min(
+            v[2]
+            for v in model.vertices
+        )
+
+        max_z = max(
+            v[2]
+            for v in model.vertices
+        )
+
+        size_y = max_y - min_y
+
+        if size_y <= 0.000001:
+            return
+
+        # Высота объекта = 50% высоты стены.
+        target_height = (
+            CELL_SIZE * 0.5
+        )
+
+        scale = (
+            target_height / size_y
+        )
+
+        # Центр клетки.
+        center_x = (
+            x + CELL_SIZE / 2
+        )
+
+        center_z = (
+            z + CELL_SIZE / 2
+        )
+
+        # Нижняя точка модели ставится точно на пол.
+        object_y = (
+            self.floor_y()
+            - min_y * scale
+        )
+
+        model.draw(
+            center_x,
+            object_y,
+            center_z,
+            scale,
+            self.object_rotation
+        )
 
     # ========================================================
     # КООРДИНАТЫ
@@ -1059,6 +1738,11 @@ class MazeGame:
             if self.walk_channel is not None:
                 self.walk_channel.stop()
                 self.walk_channel = None
+        
+        #self.object_rotation += 90.0 * dt
+
+        if self.object_rotation >= 360.0:
+            self.object_rotation -= 360.0
 
 
     # ========================================================
@@ -1342,12 +2026,21 @@ class MazeGame:
 
             grid = floor["grid"]
 
+            # ================================================
+            # ЛАБИРИНТ
+            # ================================================
+
             for z, row in enumerate(grid):
 
                 for x, ch in enumerate(row):
 
-                    world_x = x * CELL_SIZE
-                    world_z = z * CELL_SIZE
+                    world_x = (
+                        x * CELL_SIZE
+                    )
+
+                    world_z = (
+                        z * CELL_SIZE
+                    )
 
                     if ch == "f" or ch == "s":
 
@@ -1369,6 +2062,28 @@ class MazeGame:
                             world_x,
                             world_z
                         )
+
+            # ================================================
+            # ОБЪЕКТЫ
+            # ================================================
+
+            for obj in floor["objects"]:
+
+                if obj["type"] == "k":
+
+                    world_x = (
+                        obj["x"] * CELL_SIZE
+                    )
+
+                    world_z = (
+                        obj["z"] * CELL_SIZE
+                    )
+
+                    self.draw_object(
+                        "k",
+                        world_x,
+                        world_z
+                    )
 
         self.current_floor = saved_floor
 
