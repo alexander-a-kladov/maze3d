@@ -1098,6 +1098,9 @@ class MazeGame:
 
         self.load_objects()
 
+        # Инвентарь игрока.
+        # Формат: {"k": количество}
+        self.inventory = {}
         self.walk_sound = walk_sound
         self.walk_channel = None
 
@@ -1443,6 +1446,54 @@ class MazeGame:
             == "w"
         )
 
+    def has_wall_between(self, x1, z1, x2, z2, grid):
+        """
+        Проверяет, пересекает ли отрезок от (x1,z1) до (x2,z2)
+        клетку со стеной 'w' или финишем 'e'.
+
+        Координаты x/z — мировые.
+        """
+
+        dx = x2 - x1
+        dz = z2 - z1
+
+        distance = math.sqrt(dx * dx + dz * dz)
+
+        if distance <= 0.0001:
+            return False
+
+        # Шаг примерно 1/4 клетки.
+        step = CELL_SIZE * 0.25
+
+        steps = max(
+            1,
+            int(math.ceil(distance / step))
+        )
+
+        for i in range(1, steps):
+            t = i / steps
+
+            px = x1 + dx * t
+            pz = z1 + dz * t
+
+            cx = math.floor(px / CELL_SIZE)
+            cz = math.floor(pz / CELL_SIZE)
+
+            if (
+                cz < 0
+                or cz >= len(grid)
+                or cx < 0
+                or cx >= len(grid[cz])
+            ):
+                continue
+
+            cell = grid[cz][cx]
+
+            if cell == "w" or cell == "e":
+                return True
+
+        return False
+
     def is_visible_from_player(self, world_x, world_z):
         dx = world_x - self.x
         dz = world_z - self.z
@@ -1485,6 +1536,46 @@ class MazeGame:
             == "e"
         )
 
+    def cell_is_visible(self, x, z, grid):
+        center_x = x + CELL_SIZE / 2
+        center_z = z + CELL_SIZE / 2
+
+        # Очень близкие клетки всегда рисуем.
+        dx = center_x - self.x
+        dz = center_z - self.z
+
+        if dx * dx + dz * dz < (CELL_SIZE * 2) ** 2:
+            return True
+
+        return not self.has_wall_between(
+            self.x,
+            self.z,
+            center_x,
+            center_z,
+            grid
+        )
+
+    def object_is_visible(self, x, z, grid):
+        points = (
+            (x + CELL_SIZE * 0.25, z + CELL_SIZE * 0.25),
+            (x + CELL_SIZE * 0.75, z + CELL_SIZE * 0.25),
+            (x + CELL_SIZE * 0.25, z + CELL_SIZE * 0.75),
+            (x + CELL_SIZE * 0.75, z + CELL_SIZE * 0.75),
+            (x + CELL_SIZE * 0.50, z + CELL_SIZE * 0.50),
+        )
+
+        for px, pz in points:
+
+            if not self.has_wall_between(
+                self.x,
+                self.z,
+                px,
+                pz,
+                grid
+            ):
+                return True
+
+        return False
 
     # ========================================================
     # СТОЛКНОВЕНИЯ
@@ -2010,6 +2101,59 @@ class MazeGame:
             GL_TEXTURE_2D
         )
 
+#####
+# Взятие предмета
+#####
+
+    def pickup_object(self):
+        """
+        Подбирает ближайший объект в текущем этаже.
+        Сейчас поддерживается объект типа 'k'.
+        """
+
+        pickup_distance = CELL_SIZE * 0.8
+
+        player_x = self.x
+        player_z = self.z
+
+        floor = self.floors[self.current_floor]
+
+        for obj in floor["objects"]:
+            if obj["type"] != "k":
+                continue
+
+            object_x = (
+                obj["x"] * CELL_SIZE
+                + CELL_SIZE / 2
+            )
+
+            object_z = (
+                obj["z"] * CELL_SIZE
+                + CELL_SIZE / 2
+            )
+
+            dx = object_x - player_x
+            dz = object_z - player_z
+
+            distance = math.sqrt(
+                dx * dx + dz * dz
+            )
+
+            if distance <= pickup_distance:
+
+                item_type = obj["type"]
+
+                # Добавляем в инвентарь.
+                self.inventory[item_type] = (
+                    self.inventory.get(item_type, 0) + 1
+                )
+
+                # Удаляем предмет с карты.
+                floor["objects"].remove(obj)
+
+                return True
+
+        return False
 
     # ========================================================
     # ОТРИСОВКА ЛАБИРИНТА
@@ -2032,43 +2176,58 @@ class MazeGame:
             # ================================================
 
             for z, row in enumerate(grid):
-
                 for x, ch in enumerate(row):
 
-                    world_x = (
-                        x * CELL_SIZE
-                    )
+                    world_x = x * CELL_SIZE
+                    world_z = z * CELL_SIZE
 
-                    world_z = (
-                        z * CELL_SIZE
-                    )
+                    # ------------------------------------------------
+                    # СТЕНА
+                    # ------------------------------------------------
+                    if ch == "w":
 
-                    if not self.is_visible_from_player(
-                        world_x + CELL_SIZE / 2,
-                        world_z + CELL_SIZE / 2
-                    ):
-                        continue
-                    countm += 1
-                    if ch == "f" or ch == "s":
+                        # Для стен используем только дальность и угол обзора.
+                        # Не используем occlusion по центру клетки.
+                        if self.is_visible_from_player(
+                            world_x + CELL_SIZE / 2,
+                            world_z + CELL_SIZE / 2
+                        ):
+                            countm += 1
+                            self.draw_wall_cube(
+                                world_x,
+                                world_z
+                            )
 
-                        self.draw_floor_cube(
-                            world_x,
-                            world_z
-                        )
-
-                    elif ch == "w":
-
-                        self.draw_wall_cube(
-                            world_x,
-                            world_z
-                        )
-
+                    # ------------------------------------------------
+                    # ФИНИШ
+                    # ------------------------------------------------
                     elif ch == "e":
 
-                        self.draw_finish_cube(
+                        if self.is_visible_from_player(
+                            world_x + CELL_SIZE / 2,
+                            world_z + CELL_SIZE / 2
+                        ):
+                            countm += 1
+                            self.draw_finish_cube(
+                                world_x,
+                                world_z
+                            )
+
+                    # ------------------------------------------------
+                    # ПОЛ
+                    # ------------------------------------------------
+                    elif ch == "f" or ch == "s":
+
+                        if self.cell_is_visible(
                             world_x,
-                            world_z
-                        )
+                            world_z,
+                            grid
+                        ):
+                            countm += 1
+                            self.draw_floor_cube(
+                                world_x,
+                                world_z
+                            )
 
             # ================================================
             # ОБЪЕКТЫ
@@ -2078,19 +2237,16 @@ class MazeGame:
 
                 if obj["type"] == "k":
 
-                    world_x = (
-                        obj["x"] * CELL_SIZE
-                    )
+                    world_x = obj["x"] * CELL_SIZE
+                    world_z = obj["z"] * CELL_SIZE
 
-                    world_z = (
-                        obj["z"] * CELL_SIZE
-                    )
-
-                    if not self.is_visible_from_player(
-                        world_x + CELL_SIZE / 2,
-                        world_z + CELL_SIZE / 2
+                    if not self.object_is_visible(
+                        world_x,
+                        world_z,
+                        grid
                     ):
                         continue
+
                     counto += 1
                     self.draw_object(
                         "k",
@@ -2101,7 +2257,7 @@ class MazeGame:
         self.current_floor = saved_floor
         #print(countm, counto)
 
-        self.draw_sky_ceiling()
+        #self.draw_sky_ceiling()
 
 
 # ============================================================
@@ -2336,7 +2492,7 @@ def reset_game(game):
     # --------------------------------------------------------
 
     game.finished = False
-
+    game.inventory.clear()
     # --------------------------------------------------------
     # Останавливаем звук шагов
     # --------------------------------------------------------
@@ -2395,6 +2551,136 @@ def draw_fps(clock, font):
     glPopMatrix()
     glMatrixMode(GL_PROJECTION)
     glPopMatrix()
+    glMatrixMode(GL_MODELVIEW)
+
+def draw_inventory(game, font, window_width, window_height):
+    """
+    Отображает инвентарь игрока внизу слева.
+    """
+
+    if not game.inventory:
+        return
+
+    glMatrixMode(GL_PROJECTION)
+    glPushMatrix()
+    glLoadIdentity()
+
+    glOrtho(
+        0,
+        window_width,
+        0,
+        window_height,
+        -1,
+        1
+    )
+
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+    glLoadIdentity()
+
+    glDisable(GL_DEPTH_TEST)
+
+    x = 15
+    y = 15
+    line_height = 30
+
+    for index, (item_type, count) in enumerate(
+        game.inventory.items()
+    ):
+
+        text = f"{item_type} x {count}"
+
+        text_surface = font.render(
+            text,
+            True,
+            (255, 255, 255)
+        )
+
+        text_data = pygame.image.tostring(
+            text_surface,
+            "RGBA",
+            True
+        )
+
+        text_width, text_height = (
+            text_surface.get_size()
+        )
+
+        texture_id = glGenTextures(1)
+
+        glBindTexture(
+            GL_TEXTURE_2D,
+            texture_id
+        )
+
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA,
+            text_width,
+            text_height,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            text_data
+        )
+
+        glTexParameterf(
+            GL_TEXTURE_2D,
+            GL_TEXTURE_MIN_FILTER,
+            GL_LINEAR
+        )
+
+        glTexParameterf(
+            GL_TEXTURE_2D,
+            GL_TEXTURE_MAG_FILTER,
+            GL_LINEAR
+        )
+
+        glEnable(GL_TEXTURE_2D)
+        glEnable(GL_BLEND)
+
+        draw_y = y + index * line_height
+
+        glBegin(GL_QUADS)
+
+        glTexCoord2f(0.0, 0.0)
+        glVertex2f(
+            x,
+            draw_y
+        )
+
+        glTexCoord2f(1.0, 0.0)
+        glVertex2f(
+            x + text_width,
+            draw_y
+        )
+
+        glTexCoord2f(1.0, 1.0)
+        glVertex2f(
+            x + text_width,
+            draw_y + text_height
+        )
+
+        glTexCoord2f(0.0, 1.0)
+        glVertex2f(
+            x,
+            draw_y + text_height
+        )
+
+        glEnd()
+
+        glDeleteTextures([texture_id])
+
+    glDisable(GL_TEXTURE_2D)
+    glDisable(GL_BLEND)
+    glEnable(GL_DEPTH_TEST)
+
+    glPopMatrix()
+
+    glMatrixMode(GL_PROJECTION)
+    glPopMatrix()
+
     glMatrixMode(GL_MODELVIEW)
 
 # ============================================================
@@ -2562,6 +2848,8 @@ def main():
 
                     game.change_floor(-1)
 
+                elif event.key == pygame.K_e:
+                    game.pickup_object()
 
             elif (
                 event.type
@@ -2700,8 +2988,17 @@ def main():
         
         draw_fps(clock, font)
 
+
+        draw_inventory(
+            game,
+            font,
+            width,
+            height
+        )
+
         pygame.display.flip()
 
+        clock.tick(60)
 
         # Заголовок окна.
 
