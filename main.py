@@ -13,6 +13,8 @@ BASE_DIR = Path(__file__).resolve().parent
 
 FLOORS_DIR = BASE_DIR / "floors"
 OBJECTS_DIR = BASE_DIR / "objects"
+DOOR_OBJ_FILE = OBJECTS_DIR / "K.obj"
+DOOR_MTL_FILE = OBJECTS_DIR / "K.mtl"
 
 MAX_FLOORS = 2
 
@@ -21,6 +23,7 @@ FLOOR_TEXTURE_FILE = BASE_DIR / "textures" / "f.png"
 FINISH_TEXTURE_FILE = BASE_DIR / "textures" / "e.png"
 
 WALK_SOUND_FILE = BASE_DIR / "sounds" / "walk.wav"
+DOOR_SOUND_FILE = BASE_DIR / "sounds" / "door.wav"
 
 
 # ============================================================
@@ -62,8 +65,8 @@ RENDER_DISTANCE = 20.0 * CELL_SIZE
 PLAYER_HEIGHT = 0.90
 PLAYER_RADIUS = 0.22
 
-MOVE_SPEED = 3.5
-TURN_SPEED = 125.0
+MOVE_SPEED = 7.0
+TURN_SPEED = 250.0
 
 FOV = 70.0
 NEAR = 0.05
@@ -311,13 +314,23 @@ def load_floors():
                     )
 
                 elif ch == "k":
-
-                    # k НЕ является клеткой лабиринта.
-                    # Под ним появляется обычный пол.
+                    # Ключ — отдельный объект.
+                    # Под ним автоматически появляется пол.
                     clean_grid[z][x] = "f"
 
                     objects.append({
                         "type": "k",
+                        "x": x,
+                        "z": z
+                    })
+
+                elif ch == "K":
+                    # Дверь — отдельный объект.
+                    # Под дверью автоматически появляется пол.
+                    clean_grid[z][x] = "f"
+
+                    objects.append({
+                        "type": "K",
                         "x": x,
                         "z": z
                     })
@@ -1103,6 +1116,7 @@ class MazeGame:
         self.inventory = {}
         self.walk_sound = walk_sound
         self.walk_channel = None
+        self.door_sound = None
 
         self.current_floor = 0
 
@@ -1215,30 +1229,26 @@ class MazeGame:
     # =====
 
     def load_objects(self):
-
         object_files = {
             "k": (
                 OBJECTS_DIR / "k.obj",
                 OBJECTS_DIR / "k.mtl"
+            ),
+            "K": (
+                DOOR_OBJ_FILE,
+                DOOR_MTL_FILE
             )
         }
 
-        for symbol, (
-            obj_file,
-            mtl_file
-        ) in object_files.items():
+        for symbol, (obj_file, mtl_file) in object_files.items():
 
             if not obj_file.exists():
-
                 print(
-                    f"Предупреждение: "
-                    f"не найден объект {obj_file}"
+                    f"Предупреждение: не найден объект {obj_file}"
                 )
-
                 continue
 
             try:
-
                 self.objects[symbol] = OBJModel(
                     obj_file,
                     mtl_file
@@ -1250,7 +1260,6 @@ class MazeGame:
                 )
 
             except Exception as error:
-
                 print(
                     f"Ошибка загрузки объекта "
                     f"'{symbol}': {error}"
@@ -1308,6 +1317,62 @@ class MazeGame:
             center_z,
             scale,
             self.object_rotation
+        )
+
+    def draw_door(self, x, z):
+        model = self.objects.get("K")
+
+        if model is None:
+            return
+
+        min_y = min(
+            vertex[1]
+            for vertex in model.vertices
+        )
+
+        max_y = max(
+            vertex[1]
+            for vertex in model.vertices
+        )
+
+        object_height = max_y - min_y
+
+        if object_height <= 0.000001:
+            return
+
+        # Дверь имеет высоту половины стены.
+        target_height = CELL_SIZE
+
+        scale = (
+            target_height
+            / object_height
+        )
+
+        center_x = (
+            x + CELL_SIZE / 2
+        )
+
+        center_z = (
+            z + CELL_SIZE / 2
+        )
+
+        object_y = (
+            self.floor_y()
+            - min_y * scale
+        )
+
+        rotation = self.get_door_rotation(
+            int(x / CELL_SIZE),
+            int(z / CELL_SIZE),
+            self.grid
+        )
+
+        model.draw(
+            center_x,
+            object_y,
+            center_z,
+            scale,
+            rotation
         )
 
     # ========================================================
@@ -1410,6 +1475,50 @@ class MazeGame:
         self.height = self.floors[
             self.current_floor
         ]["height"]
+
+    def get_door_rotation(self, x, z, grid):
+        """
+        Определяет ориентацию двери по стенам
+        с двух противоположных сторон.
+
+        Если стены слева и справа:
+            дверь стоит поперёк X -> поворот 0 градусов.
+
+        Если стены сверху и снизу:
+            дверь стоит поперёк Z -> поворот 90 градусов.
+        """
+
+        width = len(grid[0]) if grid else 0
+        height = len(grid)
+
+        def cell(cx, cz):
+            if (
+                cz < 0
+                or cz >= height
+                or cx < 0
+                or cx >= len(grid[cz])
+            ):
+                return "w"
+
+            return grid[cz][cx]
+
+        left = cell(x - 1, z) == "w"
+        right = cell(x + 1, z) == "w"
+
+        top = cell(x, z - 1) == "w"
+        bottom = cell(x, z + 1) == "w"
+
+        # Стены слева и справа.
+        if left and right:
+            return 90.0
+
+        # Стены сверху и снизу.
+        if top and bottom:
+            return 0.0
+
+        # Если однозначно определить нельзя,
+        # оставляем стандартную ориентацию.
+        return 0.0
 
     def cell_at_world(self, x, z):
 
@@ -1581,6 +1690,29 @@ class MazeGame:
     # СТОЛКНОВЕНИЯ
     # ========================================================
 
+    def is_door_at(self, x, z):
+        floor = self.floors[self.current_floor]
+
+        cell_x = math.floor(
+            x / CELL_SIZE
+        )
+
+        cell_z = math.floor(
+            z / CELL_SIZE
+        )
+
+        for obj in floor["objects"]:
+            if obj["type"] != "K":
+                continue
+
+            if (
+                obj["x"] == cell_x
+                and obj["z"] == cell_z
+            ):
+                return True
+
+        return False
+
     def can_stand(
         self,
         x,
@@ -1603,6 +1735,9 @@ class MazeGame:
         )
 
         for px, pz in points:
+
+            if self.is_door_at(px, pz):
+                return False
 
             cell = self.cell_at_world(
                 px,
@@ -2155,6 +2290,60 @@ class MazeGame:
 
         return False
 
+    def open_door(self):
+        """
+        Открывает ближайшую дверь K, если есть ключ k.
+        """
+
+        if self.inventory.get("k", 0) <= 0:
+            return False
+
+        pickup_distance = CELL_SIZE * 0.8
+
+        player_x = self.x
+        player_z = self.z
+
+        floor = self.floors[self.current_floor]
+
+        for obj in floor["objects"]:
+            if obj["type"] != "K":
+                continue
+
+            door_x = (
+                obj["x"] * CELL_SIZE
+                + CELL_SIZE / 2
+            )
+
+            door_z = (
+                obj["z"] * CELL_SIZE
+                + CELL_SIZE / 2
+            )
+
+            dx = door_x - player_x
+            dz = door_z - player_z
+
+            distance = math.sqrt(
+                dx * dx + dz * dz
+            )
+
+            if distance <= pickup_distance:
+                # Тратим один ключ
+                self.inventory["k"] -= 1
+
+                if self.inventory["k"] <= 0:
+                    del self.inventory["k"]
+
+                # Удаляем дверь с этажа
+                floor["objects"].remove(obj)
+
+                # Звук открытия
+                if self.door_sound is not None:
+                    self.door_sound.play()
+
+                return True
+
+        return False
+
     # ========================================================
     # ОТРИСОВКА ЛАБИРИНТА
     # ========================================================
@@ -2235,21 +2424,35 @@ class MazeGame:
 
             for obj in floor["objects"]:
 
+                world_x = obj["x"] * CELL_SIZE
+                world_z = obj["z"] * CELL_SIZE
+
+                if not self.object_is_visible(
+                    world_x,
+                    world_z,
+                    grid
+                ):
+                    continue
+
+                counto += 1
+
+                # ------------------------------------------------
+                # КЛЮЧ
+                # ------------------------------------------------
                 if obj["type"] == "k":
 
-                    world_x = obj["x"] * CELL_SIZE
-                    world_z = obj["z"] * CELL_SIZE
-
-                    if not self.object_is_visible(
-                        world_x,
-                        world_z,
-                        grid
-                    ):
-                        continue
-
-                    counto += 1
                     self.draw_object(
                         "k",
+                        world_x,
+                        world_z
+                    )
+
+                # ------------------------------------------------
+                # ДВЕРЬ
+                # ------------------------------------------------
+                elif obj["type"] == "K":
+
+                    self.draw_door(
                         world_x,
                         world_z
                     )
@@ -2769,6 +2972,10 @@ def main():
         WALK_SOUND_FILE
     )
 
+    door_sound = load_walk_sound(
+        DOOR_SOUND_FILE
+    )
+
 
     setup_opengl(
         width,
@@ -2777,15 +2984,14 @@ def main():
 
 
     game = MazeGame(
-
         floors,
-
         wall_texture,
         floor_texture,
         finish_texture,
-
         walk_sound
     )
+
+    game.door_sound = door_sound
 
 
     clock = pygame.time.Clock()
@@ -2849,7 +3055,8 @@ def main():
                     game.change_floor(-1)
 
                 elif event.key == pygame.K_e:
-                    game.pickup_object()
+                    if not game.open_door():
+                        game.pickup_object()
 
             elif (
                 event.type
