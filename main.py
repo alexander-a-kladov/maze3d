@@ -24,6 +24,7 @@ FINISH_TEXTURE_FILE = BASE_DIR / "textures" / "e.png"
 
 WALK_SOUND_FILE = BASE_DIR / "sounds" / "walk.wav"
 DOOR_SOUND_FILE = BASE_DIR / "sounds" / "door.wav"
+LIFT_SOUND_FILE = BASE_DIR / "sounds" / "lift.wav"
 
 
 # ============================================================
@@ -333,6 +334,23 @@ def load_floors():
                         "type": "K",
                         "x": x,
                         "z": z
+                    })
+
+                elif ch == "l":
+                    clean_grid[z][x] = " "
+
+                    objects.append({
+                        "type": "l",
+                        "x": x,
+                        "z": z,
+                        "floor": level,
+                        "initial_floor": level,
+                        "initial_x": x,
+                        "initial_z": z,
+                        "moving": False,
+                        "direction": 0,
+                        "progress": 0.0,
+                        "target_floor": level
                     })
 
         # Возвращаем строки обратно
@@ -1111,6 +1129,21 @@ class MazeGame:
 
         self.load_objects()
 
+        self.initial_lifts = []
+
+        for floor in self.floors:
+            for obj in floor["objects"]:
+                if obj["type"] == "l":
+                    self.initial_lifts.append(
+                        {
+                            "floor": obj["floor"],
+                            "x": obj["x"],
+                            "z": obj["z"]
+                        }
+                    )
+
+        self.lift_sound = None
+
         # Инвентарь игрока.
         # Формат: {"k": количество}
         self.inventory = {}
@@ -1237,6 +1270,10 @@ class MazeGame:
             "K": (
                 DOOR_OBJ_FILE,
                 DOOR_MTL_FILE
+            ),
+            "l": (
+                OBJECTS_DIR / "l.obj",
+                OBJECTS_DIR / "l.mtl"
             )
         }
 
@@ -1294,18 +1331,13 @@ class MazeGame:
         if object_height <= 0.000001:
             return
 
-        # Высота объекта = половина высоты стены.
-        # Стена имеет высоту 2.0.
         target_height = CELL_SIZE * 0.5
 
         scale = target_height / object_height
 
-        # Центр клетки.
         center_x = x + CELL_SIZE / 2
         center_z = z + CELL_SIZE / 2
 
-        # Ставим нижнюю точку объекта на верхнюю
-        # поверхность пола.
         object_y = (
             self.floor_y()
             - min_y * scale
@@ -1317,6 +1349,88 @@ class MazeGame:
             center_z,
             scale,
             self.object_rotation
+        )
+
+    def draw_lift(
+        self,
+        obj,
+        x,
+        z,
+        floor_index
+    ):
+        model = self.objects.get("l")
+
+        if model is None:
+            return
+
+        if not model.vertices:
+            return
+
+        min_x = min(
+            v[0]
+            for v in model.vertices
+        )
+
+        max_x = max(
+            v[0]
+            for v in model.vertices
+        )
+
+        min_z = min(
+            v[2]
+            for v in model.vertices
+        )
+
+        max_z = max(
+            v[2]
+            for v in model.vertices
+        )
+
+        width = max_x - min_x
+        depth = max_z - min_z
+
+        horizontal_size = max(
+            width,
+            depth
+        )
+
+        if horizontal_size <= 0.000001:
+            return
+
+        scale = (
+            CELL_SIZE
+            / horizontal_size
+        )
+
+        center_x = (
+            x + CELL_SIZE / 2
+        )
+
+        center_z = (
+            z + CELL_SIZE / 2
+        )
+
+        min_y = min(
+            v[1]
+            for v in model.vertices
+        )
+
+        lift_y = (
+            floor_index
+            * FLOOR_LEVEL_HEIGHT
+            + FLOOR_HEIGHT
+            + obj["direction"]
+            * obj["progress"]
+            * FLOOR_LEVEL_HEIGHT
+            - min_y * scale
+        )
+
+        model.draw(
+            center_x,
+            lift_y,
+            center_z,
+            scale,
+            0.0
         )
 
     def draw_door(self, x, z):
@@ -1385,8 +1499,7 @@ class MazeGame:
             * FLOOR_LEVEL_HEIGHT
         )
 
-    def change_floor(self, direction):
-
+    def get_player_lift(self):
         current_x = math.floor(
             self.x / CELL_SIZE
         )
@@ -1395,86 +1508,101 @@ class MazeGame:
             self.z / CELL_SIZE
         )
 
-        # ========================================================
-        # ВВЕРХ
-        # ========================================================
-
-        if direction > 0:
-
-            target_floor = (
-                self.current_floor + 1
-            )
-
-            # Выше этажей нет
-            if target_floor >= self.floor_count:
-                return
-
-            target_grid = self.floors[
-                target_floor
-            ]["grid"]
-
-            # Проверяем координату Z
-            if (
-                current_z < 0
-                or current_z >= len(target_grid)
-            ):
-                return
-
-            row = target_grid[current_z]
-
-            # Проверяем координату X
-            if (
-                current_x < 0
-                or current_x >= len(row)
-            ):
-                return
-
-            # Сверху обязательно должна быть пустая клетка
-            if row[current_x] != " ":
-                return
-
-            # Переходим вверх
-            self.current_floor = target_floor
-
-        # ========================================================
-        # ВНИЗ
-        # ========================================================
-
-        else:
-
-            # Вниз можно только если текущая клетка пустая
-            if self.cell_at_world(
-                self.x,
-                self.z
-            ) != " ":
-                return
-
-            target_floor = (
-                self.current_floor - 1
-            )
-
-            # Ниже этажей нет
-            if target_floor < 0:
-                return
-
-            # Переходим вниз
-            self.current_floor = target_floor
-
-        # ========================================================
-        # Обновляем текущую карту
-        # ========================================================
-
-        self.grid = self.floors[
+        for obj in self.floors[
             self.current_floor
+        ]["objects"]:
+
+            if obj["type"] != "l":
+                continue
+
+            if (
+                obj["x"] == current_x
+                and
+                obj["z"] == current_z
+            ):
+                return obj
+
+        return None
+
+    def get_player_lift(self):
+        current_x = math.floor(
+            self.x / CELL_SIZE
+        )
+
+        current_z = math.floor(
+            self.z / CELL_SIZE
+        )
+
+        for obj in self.floors[
+            self.current_floor
+        ]["objects"]:
+
+            if obj["type"] != "l":
+                continue
+
+            if (
+                obj["x"] == current_x
+                and
+                obj["z"] == current_z
+            ):
+                return obj
+
+        return None
+
+    def change_floor(self, direction):
+        lift = self.get_player_lift()
+
+        if lift is None:
+            return
+
+        if lift["moving"]:
+            return
+
+        current_floor = lift["floor"]
+
+        target_floor = (
+            current_floor + direction
+        )
+
+        if (
+            target_floor < 0
+            or
+            target_floor >= self.floor_count
+        ):
+            return
+
+        current_x = lift["x"]
+        current_z = lift["z"]
+
+        target_grid = self.floors[
+            target_floor
         ]["grid"]
 
-        self.width = self.floors[
-            self.current_floor
-        ]["width"]
+        if (
+            current_z < 0
+            or current_z >= len(target_grid)
+        ):
+            return
 
-        self.height = self.floors[
-            self.current_floor
-        ]["height"]
+        row = target_grid[current_z]
+
+        if (
+            current_x < 0
+            or current_x >= len(row)
+        ):
+            return
+
+        # Над / под лифтом не должно быть пола.
+        if row[current_x] != " ":
+            return
+
+        lift["moving"] = True
+        lift["direction"] = direction
+        lift["progress"] = 0.0
+        lift["target_floor"] = target_floor
+
+        if self.lift_sound is not None:
+            self.lift_sound.play()
 
     def get_door_rotation(self, x, z, grid):
         """
@@ -1521,9 +1649,24 @@ class MazeGame:
         return 0.0
 
     def cell_at_world(self, x, z):
-
         cx = math.floor(x / CELL_SIZE)
         cz = math.floor(z / CELL_SIZE)
+
+        # Лифт является реальной проходимой клеткой,
+        # даже если исходная карта в этой координате содержит " ".
+        for obj in self.floors[
+            self.current_floor
+        ]["objects"]:
+
+            if obj["type"] != "l":
+                continue
+
+            if (
+                obj["x"] == cx
+                and
+                obj["z"] == cz
+            ):
+                return "l"
 
         if (
             cz < 0
@@ -1744,7 +1887,7 @@ class MazeGame:
                 pz
             )
 
-            if cell == "w" or cell == "e":
+            if cell == "w" or cell == "e" or cell == " ":
                 return False
 
         return True
@@ -1898,6 +2041,66 @@ class MazeGame:
                 self.walk_channel = None
 
             return
+
+        # ========================================================
+        # АНИМАЦИЯ ЛИФТОВ
+        # ========================================================
+
+        LIFT_SPEED = 2.5
+
+        for floor in self.floors:
+            for lift in floor["objects"][:]:
+
+                if lift["type"] != "l":
+                    continue
+
+                if not lift["moving"]:
+                    continue
+
+                lift["progress"] += (
+                    dt * LIFT_SPEED
+                )
+
+                if lift["progress"] < 1.0:
+                    continue
+
+                # Переезд завершён.
+                lift["progress"] = 1.0
+
+                old_floor = lift["floor"]
+                new_floor = lift["target_floor"]
+
+                old_objects = self.floors[
+                    old_floor
+                ]["objects"]
+
+                if lift in old_objects:
+                    old_objects.remove(lift)
+
+                lift["floor"] = new_floor
+                lift["moving"] = False
+                lift["direction"] = 0
+                lift["progress"] = 0.0
+                lift["target_floor"] = new_floor
+
+                self.floors[
+                    new_floor
+                ]["objects"].append(lift)
+
+                # Игрок приезжает вместе с лифтом.
+                self.current_floor = new_floor
+
+                self.grid = self.floors[
+                    new_floor
+                ]["grid"]
+
+                self.width = self.floors[
+                    new_floor
+                ]["width"]
+
+                self.height = self.floors[
+                    new_floor
+                ]["height"]
 
         # --------------------------------------------------------
         # Поворот
@@ -2457,6 +2660,29 @@ class MazeGame:
                         world_z
                     )
 
+                # ------
+                # ЛИФТ
+                # ------
+                elif obj["type"] == "l":
+                    world_x = obj["x"] * CELL_SIZE
+                    world_z = obj["z"] * CELL_SIZE
+
+                    if not self.object_is_visible(
+                        world_x,
+                        world_z,
+                        grid
+                    ):
+                        continue
+
+                    counto += 1
+
+                    self.draw_lift(
+                        obj,
+                        world_x,
+                        world_z,
+                        obj["floor"]
+                    )
+
         self.current_floor = saved_floor
         #print(countm, counto)
 
@@ -2508,6 +2734,7 @@ def setup_opengl(width, height):
     )
 
     glMatrixMode(GL_MODELVIEW)
+
 
 
 # ============================================================
@@ -2602,6 +2829,18 @@ def render(
         + PLAYER_HEIGHT
     )
 
+    player_lift = game.get_player_lift()
+
+    if (
+        player_lift is not None
+        and player_lift["moving"]
+    ):
+        camera_y += (
+            player_lift["direction"]
+            * player_lift["progress"]
+            * FLOOR_LEVEL_HEIGHT
+        )
+
     # ========================================================
     # Камера
     # ========================================================
@@ -2664,6 +2903,34 @@ def reset_game(game):
     game.height = game.floors[
         start_floor
     ]["height"]
+
+    # --------------------------------------------------------
+    # Возвращаем все лифты на исходные позиции
+    # --------------------------------------------------------
+
+    for floor in game.floors:
+        floor["objects"] = [
+            obj
+            for obj in floor["objects"]
+            if obj["type"] != "l"
+        ]
+
+    for initial_lift in game.initial_lifts:
+        game.floors[
+            initial_lift["floor"]
+        ]["objects"].append({
+            "type": "l",
+            "x": initial_lift["x"],
+            "z": initial_lift["z"],
+            "floor": initial_lift["floor"],
+            "initial_floor": initial_lift["floor"],
+            "initial_x": initial_lift["x"],
+            "initial_z": initial_lift["z"],
+            "moving": False,
+            "direction": 0,
+            "progress": 0.0,
+            "target_floor": initial_lift["floor"]
+        })
 
     # --------------------------------------------------------
     # Возвращаем позицию игрока
@@ -2976,6 +3243,9 @@ def main():
         DOOR_SOUND_FILE
     )
 
+    lift_sound = load_walk_sound(
+        LIFT_SOUND_FILE
+    )
 
     setup_opengl(
         width,
@@ -2992,6 +3262,7 @@ def main():
     )
 
     game.door_sound = door_sound
+    game.lift_sound = lift_sound
 
 
     clock = pygame.time.Clock()
