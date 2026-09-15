@@ -25,6 +25,7 @@ FINISH_TEXTURE_FILE = BASE_DIR / "textures" / "e.png"
 WALK_SOUND_FILE = BASE_DIR / "sounds" / "walk.wav"
 DOOR_SOUND_FILE = BASE_DIR / "sounds" / "door.wav"
 LIFT_SOUND_FILE = BASE_DIR / "sounds" / "lift.wav"
+TAKE_SOUND_FILE = BASE_DIR / "sounds" / "take.wav"
 
 
 # ============================================================
@@ -1115,8 +1116,9 @@ class MazeGame:
         wall_texture,
         floor_texture,
         finish_texture,
-        walk_sound
-        ):
+        walk_sound,
+        take_sound
+    ):
 
         self.floors = floors
         self.floor_count = len(floors)
@@ -1148,6 +1150,7 @@ class MazeGame:
         # Формат: {"k": количество}
         self.inventory = {}
         self.walk_sound = walk_sound
+        self.take_sound = take_sound
         self.walk_channel = None
         self.door_sound = None
 
@@ -2023,6 +2026,7 @@ class MazeGame:
             self.finished = True
 
 
+
     # ========================================================
     # UPDATE
     # ========================================================
@@ -2485,6 +2489,10 @@ class MazeGame:
                 self.inventory[item_type] = (
                     self.inventory.get(item_type, 0) + 1
                 )
+
+
+                if self.take_sound is not None:
+                    self.take_sound.play()
 
                 # Удаляем предмет с карты.
                 floor["objects"].remove(obj)
@@ -3023,135 +3031,168 @@ def draw_fps(clock, font):
     glPopMatrix()
     glMatrixMode(GL_MODELVIEW)
 
-def draw_inventory(game, font, window_width, window_height):
-    """
-    Отображает инвентарь игрока внизу слева.
-    """
+def draw_inventory(self, width, height):
+    count = self.inventory.get("k", 0)
 
-    if not game.inventory:
+    if count <= 0:
         return
+
+    model = self.objects.get("k")
+
+    if model is None or not model.vertices:
+        return
+
+    # --------------------------------------------------------
+    # Размер модели
+    # --------------------------------------------------------
+
+    min_x = min(v[0] for v in model.vertices)
+    max_x = max(v[0] for v in model.vertices)
+
+    min_y = min(v[1] for v in model.vertices)
+    max_y = max(v[1] for v in model.vertices)
+
+    min_z = min(v[2] for v in model.vertices)
+    max_z = max(v[2] for v in model.vertices)
+
+    size_x = max_x - min_x
+    size_y = max_y - min_y
+    size_z = max_z - min_z
+
+    model_size = max(
+        size_x,
+        size_y,
+        size_z
+    )
+
+    if model_size <= 0.000001:
+        return
+
+    # --------------------------------------------------------
+    # HUD
+    # --------------------------------------------------------
+
+    icon_size = 64
+    margin = 15
+
+    icon_x = margin
+    icon_y = margin
+
+    # --------------------------------------------------------
+    # Сохраняем 3D-состояние
+    # --------------------------------------------------------
 
     glMatrixMode(GL_PROJECTION)
     glPushMatrix()
+
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+
+    # --------------------------------------------------------
+    # Небольшая 3D-сцена для иконки
+    # --------------------------------------------------------
+
+    glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
 
     glOrtho(
         0,
-        window_width,
+        width,
         0,
-        window_height,
-        -1,
-        1
+        height,
+        -100,
+        100
     )
 
     glMatrixMode(GL_MODELVIEW)
-    glPushMatrix()
     glLoadIdentity()
 
     glDisable(GL_DEPTH_TEST)
 
-    x = 15
-    y = 15
-    line_height = 30
+    # --------------------------------------------------------
+    # Центрируем модель в квадрате HUD
+    # --------------------------------------------------------
 
-    for index, (item_type, count) in enumerate(
-        game.inventory.items()
-    ):
+    glTranslatef(
+        icon_x + icon_size * 0.5,
+        icon_y + icon_size * 0.5,
+        0.0
+    )
 
-        text = f"{item_type} x {count}"
+    hud_scale = (
+        icon_size * 0.75
+        / model_size
+    )
 
-        text_surface = font.render(
-            text,
-            True,
-            (255, 255, 255)
-        )
+    glScalef(
+        hud_scale,
+        hud_scale,
+        hud_scale
+    )
 
-        text_data = pygame.image.tostring(
-            text_surface,
-            "RGBA",
-            True
-        )
+    # Центр модели по всем осям
+    center_model_x = (
+        min_x + max_x
+    ) * 0.5
 
-        text_width, text_height = (
-            text_surface.get_size()
-        )
+    center_model_y = (
+        min_y + max_y
+    ) * 0.5
 
-        texture_id = glGenTextures(1)
+    center_model_z = (
+        min_z + max_z
+    ) * 0.5
 
-        glBindTexture(
-            GL_TEXTURE_2D,
-            texture_id
-        )
+    glTranslatef(
+        -center_model_x,
+        -center_model_y,
+        -center_model_z
+    )
 
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            GL_RGBA,
-            text_width,
-            text_height,
-            0,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            text_data
-        )
+    # Небольшой постоянный поворот,
+    # чтобы объект было лучше видно.
+    glRotatef(
+        25.0,
+        1.0,
+        0.0,
+        0.0
+    )
 
-        glTexParameterf(
-            GL_TEXTURE_2D,
-            GL_TEXTURE_MIN_FILTER,
-            GL_LINEAR
-        )
+    glRotatef(
+        self.object_rotation,
+        0.0,
+        1.0,
+        0.0
+    )
 
-        glTexParameterf(
-            GL_TEXTURE_2D,
-            GL_TEXTURE_MAG_FILTER,
-            GL_LINEAR
-        )
+    model.draw(
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+    )
 
-        glEnable(GL_TEXTURE_2D)
-        glEnable(GL_BLEND)
+    # --------------------------------------------------------
+    # Восстанавливаем 2D/HUD состояние
+    # --------------------------------------------------------
 
-        draw_y = y + index * line_height
-
-        glBegin(GL_QUADS)
-
-        glTexCoord2f(0.0, 0.0)
-        glVertex2f(
-            x,
-            draw_y
-        )
-
-        glTexCoord2f(1.0, 0.0)
-        glVertex2f(
-            x + text_width,
-            draw_y
-        )
-
-        glTexCoord2f(1.0, 1.0)
-        glVertex2f(
-            x + text_width,
-            draw_y + text_height
-        )
-
-        glTexCoord2f(0.0, 1.0)
-        glVertex2f(
-            x,
-            draw_y + text_height
-        )
-
-        glEnd()
-
-        glDeleteTextures([texture_id])
-
-    glDisable(GL_TEXTURE_2D)
-    glDisable(GL_BLEND)
     glEnable(GL_DEPTH_TEST)
 
+    glMatrixMode(GL_MODELVIEW)
     glPopMatrix()
 
     glMatrixMode(GL_PROJECTION)
     glPopMatrix()
 
     glMatrixMode(GL_MODELVIEW)
+
+    # --------------------------------------------------------
+    # Количество
+    # --------------------------------------------------------
+
+    # Здесь рисуем количество обычным pygame-шрифтом
+    # поверх OpenGL HUD.
 
 # ============================================================
 # MAIN
@@ -3247,6 +3288,10 @@ def main():
         LIFT_SOUND_FILE
     )
 
+    take_sound = load_walk_sound(
+        TAKE_SOUND_FILE
+    )
+
     setup_opengl(
         width,
         height
@@ -3258,7 +3303,8 @@ def main():
         wall_texture,
         floor_texture,
         finish_texture,
-        walk_sound
+        walk_sound,
+        take_sound
     )
 
     game.door_sound = door_sound
@@ -3469,7 +3515,6 @@ def main():
 
         draw_inventory(
             game,
-            font,
             width,
             height
         )
