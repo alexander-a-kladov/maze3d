@@ -1163,6 +1163,22 @@ class MazeGame:
 
         self.finished = False
 
+        self.show_map = False
+
+        # Посещённые клетки для каждого этажа.
+        # Формат:
+        # self.visited_maps[floor][z][x] = символ
+        self.visited_maps = []
+
+        for floor in self.floors:
+            height = floor["height"]
+            width = floor["width"]
+
+            self.visited_maps.append([
+                [None for _ in range(width)]
+                for _ in range(height)
+            ])
+
         self.object_rotation = 0.0
 
         self.wall_texture = (
@@ -1259,6 +1275,399 @@ class MazeGame:
             self.finish_shader,
             "u_texture"
         )
+
+    def update_visited_map(self):
+        floor_index = self.current_floor
+
+        if (
+            floor_index < 0
+            or floor_index >= self.floor_count
+        ):
+            return
+
+        floor = self.floors[floor_index]
+        grid = floor["grid"]
+
+        for z, row in enumerate(grid):
+            for x, ch in enumerate(row):
+
+                world_x = x * CELL_SIZE
+                world_z = z * CELL_SIZE
+
+                # ------------------------------------------------
+                # Обычные клетки лабиринта
+                # ------------------------------------------------
+
+                if ch in ("w", "e", "f", "s"):
+
+                    if not self.cell_is_visible(
+                        world_x,
+                        world_z,
+                        grid
+                    ):
+                        continue
+
+                    self.mark_visible_cell(
+                        floor_index,
+                        x,
+                        z,
+                        ch
+                    )
+
+        # --------------------------------------------------------
+        # Объекты
+        # --------------------------------------------------------
+
+        for obj in floor["objects"]:
+
+            x = obj["x"]
+            z = obj["z"]
+
+            world_x = x * CELL_SIZE
+            world_z = z * CELL_SIZE
+
+            if not self.object_is_visible(
+                world_x,
+                world_z,
+                grid
+            ):
+                continue
+
+            self.mark_visible_cell(
+                floor_index,
+                x,
+                z,
+                obj["type"]
+            )
+
+    def draw_visited_map(
+        self,
+        screen_width,
+        screen_height
+    ):
+        floor_index = self.current_floor
+        floor = self.floors[floor_index]
+
+        grid = self.visited_maps[floor_index]
+
+        if not grid:
+            return
+
+        map_height = len(grid)
+        map_width = len(grid[0])
+
+        margin = 40
+
+        available_width = (
+            screen_width
+            - margin * 2
+        )
+
+        available_height = (
+            screen_height
+            - margin * 2
+        )
+
+        cell_size = min(
+            available_width / max(map_width, 1),
+            available_height / max(map_height, 1)
+        )
+
+        map_width_px = (
+            map_width * cell_size
+        )
+
+        map_height_px = (
+            map_height * cell_size
+        )
+
+        start_x = (
+            screen_width
+            - map_width_px
+        ) * 0.5
+
+        start_y = (
+            screen_height
+            - map_height_px
+        ) * 0.5
+
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+
+        glOrtho(
+            0,
+            screen_width,
+            0,
+            screen_height,
+            -1,
+            1
+        )
+
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_TEXTURE_2D)
+
+        # Фон карты
+        glColor3f(
+            0.05,
+            0.05,
+            0.05
+        )
+
+        glBegin(GL_QUADS)
+
+        glVertex2f(
+            0,
+            0
+        )
+
+        glVertex2f(
+            screen_width,
+            0
+        )
+
+        glVertex2f(
+            screen_width,
+            screen_height
+        )
+
+        glVertex2f(
+            0,
+            screen_height
+        )
+
+        glEnd()
+
+        for z in range(map_height):
+            for x in range(map_width):
+
+                symbol = grid[z][x]
+
+                if symbol is None:
+                    continue
+
+                px = (
+                    start_x
+                    + x * cell_size
+                )
+
+                py = (
+                    start_y
+                    + (
+                        map_height
+                        - 1
+                        - z
+                    ) * cell_size
+                )
+
+                if symbol == "w":
+                    glColor3f(
+                        0.65,
+                        0.65,
+                        0.65
+                    )
+
+                elif symbol == "e":
+                    glColor3f(
+                        1.0,
+                        0.75,
+                        0.1
+                    )
+
+                elif symbol == "s":
+                    glColor3f(
+                        0.2,
+                        0.8,
+                        0.2
+                    )
+
+                elif symbol == "l":
+                    glColor3f(
+                        0.2,
+                        0.7,
+                        1.0
+                    )
+
+                elif symbol == "K":
+                    glColor3f(
+                        0.8,
+                        0.2,
+                        0.2
+                    )
+
+                elif symbol == "k":
+                    glColor3f(
+                        0.9,
+                        0.6,
+                        0.2
+                    )
+
+                else:
+                    glColor3f(
+                        0.25,
+                        0.25,
+                        0.25
+                    )
+
+                glBegin(GL_QUADS)
+
+                glVertex2f(
+                    px,
+                    py
+                )
+
+                glVertex2f(
+                    px + cell_size - 1,
+                    py
+                )
+
+                glVertex2f(
+                    px + cell_size - 1,
+                    py + cell_size - 1
+                )
+
+                glVertex2f(
+                    px,
+                    py + cell_size - 1
+                )
+
+                glEnd()
+
+        # ========================================================
+        # ПОЗИЦИЯ И НАПРАВЛЕНИЕ ИГРОКА
+        # ========================================================
+
+        player_cell_x = math.floor(
+            self.x / CELL_SIZE
+        )
+
+        player_cell_z = math.floor(
+            self.z / CELL_SIZE
+        )
+
+        if (
+            0 <= player_cell_x < map_width
+            and
+            0 <= player_cell_z < map_height
+        ):
+            player_px = (
+                start_x
+                + player_cell_x * cell_size
+                + cell_size * 0.5
+            )
+
+            player_py = (
+                start_y
+                + (
+                    map_height
+                    - 1
+                    - player_cell_z
+                ) * cell_size
+                + cell_size * 0.5
+            )
+
+            # Направление тела игрока.
+            angle = math.radians(self.yaw)
+
+            # В мировых координатах:
+            # X = sin(yaw)
+            # Z = -cos(yaw)
+            dir_x = math.sin(angle)
+            dir_z = -math.cos(angle)
+
+            # На карте ось Y направлена вверх,
+            # поэтому мировое Z инвертируем.
+            dir_map_x = dir_x
+            dir_map_y = -dir_z
+
+            length = cell_size * 0.38
+
+            tip_x = (
+                player_px
+                + dir_map_x * length
+            )
+
+            tip_y = (
+                player_py
+                + dir_map_y * length
+            )
+
+            # Перпендикуляр к направлению.
+            perp_x = -dir_map_y
+            perp_y = dir_map_x
+
+            base_length = cell_size * 0.25
+            base_width = cell_size * 0.16
+
+            base_x = (
+                player_px
+                - dir_map_x * base_length
+            )
+
+            base_y = (
+                player_py
+                - dir_map_y * base_length
+            )
+
+            left_x = (
+                base_x
+                + perp_x * base_width
+            )
+
+            left_y = (
+                base_y
+                + perp_y * base_width
+            )
+
+            right_x = (
+                base_x
+                - perp_x * base_width
+            )
+
+            right_y = (
+                base_y
+                - perp_y * base_width
+            )
+
+            # Стрелка
+            glColor3f(
+                1.0,
+                0.2,
+                0.2
+            )
+
+            glBegin(GL_TRIANGLES)
+
+            glVertex2f(
+                tip_x,
+                tip_y
+            )
+
+            glVertex2f(
+                left_x,
+                left_y
+            )
+
+            glVertex2f(
+                right_x,
+                right_y
+            )
+
+            glEnd()
+
+        glEnable(GL_TEXTURE_2D)
+        glEnable(GL_DEPTH_TEST)
+
+        glPopMatrix()
+
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+
+        glMatrixMode(GL_MODELVIEW)
 
     # =====
     # Загрузка 3d-объектов
@@ -1491,6 +1900,34 @@ class MazeGame:
             scale,
             rotation
         )
+
+    def mark_visible_cell(
+        self,
+        floor_index,
+        x,
+        z,
+        symbol
+    ):
+        if floor_index < 0:
+            return
+
+        if floor_index >= len(self.visited_maps):
+            return
+
+        visited = self.visited_maps[floor_index]
+
+        if z < 0 or z >= len(visited):
+            return
+
+        if x < 0 or x >= len(visited[z]):
+            return
+
+        # Не перезаписываем уже известную информацию
+        # пустым значением.
+        if symbol is None:
+            return
+
+        visited[z][x] = symbol
 
     # ========================================================
     # КООРДИНАТЫ
@@ -2593,6 +3030,14 @@ class MazeGame:
                             world_z + CELL_SIZE / 2
                         ):
                             countm += 1
+
+                            self.mark_visible_cell(
+                                        floor_index,
+                                        x,
+                                        z,
+                                        "w"
+                                    )
+
                             self.draw_wall_cube(
                                 world_x,
                                 world_z
@@ -2608,6 +3053,14 @@ class MazeGame:
                             world_z + CELL_SIZE / 2
                         ):
                             countm += 1
+
+                            self.mark_visible_cell(
+                                floor_index,
+                                x,
+                                z,
+                                "e"
+                            )
+
                             self.draw_finish_cube(
                                 world_x,
                                 world_z
@@ -2624,6 +3077,14 @@ class MazeGame:
                             grid
                         ):
                             countm += 1
+
+                            self.mark_visible_cell(
+                                floor_index,
+                                x,
+                                z,
+                                ch
+                            )
+
                             self.draw_floor_cube(
                                 world_x,
                                 world_z
@@ -2645,6 +3106,13 @@ class MazeGame:
                 ):
                     continue
 
+                self.mark_visible_cell(
+                    floor_index,
+                    obj["x"],
+                    obj["z"],
+                    obj["type"]
+                )
+
                 counto += 1
 
                 # ------------------------------------------------
@@ -2657,6 +3125,8 @@ class MazeGame:
                         world_x,
                         world_z
                     )
+
+
 
                 # ------------------------------------------------
                 # ДВЕРЬ
@@ -2869,8 +3339,17 @@ def render(
         0
     )
 
+    # Сначала обновляем посещённую карту текущим кадром.
+    game.update_visited_map()
 
-    game.draw_world()
+    # Затем отображаем либо мир, либо карту.
+    if game.show_map:
+        game.draw_visited_map(
+            width,
+            height
+        )
+    else:
+        game.draw_world()
 
 
 # ============================================================
@@ -2979,6 +3458,17 @@ def reset_game(game):
 
         game.walk_channel.stop()
         game.walk_channel = None
+
+    game.show_map = False
+
+    for floor_index, floor in enumerate(game.floors):
+        height = floor["height"]
+        width = floor["width"]
+
+        game.visited_maps[floor_index] = [
+            [None for _ in range(width)]
+            for _ in range(height)
+        ]
 
 
 def draw_fps(clock, font):
@@ -3370,6 +3860,9 @@ def main():
                 elif event.key == pygame.K_z:
 
                     game.change_floor(-1)
+
+                elif event.key == pygame.K_m:
+                    game.show_map = not game.show_map
 
                 elif event.key == pygame.K_e:
                     if not game.open_door():
